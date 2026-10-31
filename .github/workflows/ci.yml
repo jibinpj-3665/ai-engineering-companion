@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Typecheck, tests and frontend build
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: "utf-8"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            frontend/package-lock.json
+
+      - name: Install root dependencies
+        run: npm ci
+
+      - name: Install frontend dependencies
+        run: npm ci --prefix frontend
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Create backend virtual environment
+        run: python -m venv backend\.venv
+
+      - name: Install backend dependencies
+        run: |
+          backend\.venv\Scripts\python.exe -m pip install --upgrade pip
+          backend\.venv\Scripts\python.exe -m pip install -r backend\requirements.txt
+
+      - name: Typecheck frontend
+        run: npm run typecheck
+
+      - name: Run backend tests
+        run: npm run test:backend
+
+      - name: Run frontend tests
+        run: npm run test:frontend
+
+      - name: Build frontend
+        run: npm run build:frontend

@@ -1,0 +1,81 @@
+{
+  "name": "ai-engineering-companion",
+  "version": "1.0.0",
+  "description": "AI-powered engineering education companion for Windows. Learn Engineering. Think Deeper. Build the Future.",
+  "author": {
+    "name": "jibinpj-3665",
+    "email": "jibinpj-3665@users.noreply.github.com"
+  },
+  "license": "MIT",
+  "private": true,
+  "main": "desktop/main.js",
+  "scripts": {
+    "dev": "concurrently -k -n backend,frontend -c cyan,magenta \"npm:dev:backend\" \"npm:dev:frontend\"",
+    "dev:backend": "backend\\.venv\\Scripts\\python.exe backend\\run.py",
+    "dev:frontend": "npm --prefix frontend run dev",
+    "desktop:dev": "concurrently -k -n backend,frontend,electron -c cyan,magenta,yellow \"npm:dev:backend\" \"npm:dev:frontend\" \"npm:dev:electron\"",
+    "dev:electron": "wait-on http://127.0.0.1:8765/api/health http://localhost:5173 && cross-env AEC_DEV_SERVER=http://localhost:5173 electron .",
+    "build:frontend": "npm --prefix frontend run build",
+    "build:backend": "powershell -ExecutionPolicy Bypass -File scripts/build-backend.ps1",
+    "build": "npm run build:frontend && npm run build:backend",
+    "dist": "npm run build && electron-builder --win nsis",
+    "start": "electron .",
+    "test:backend": "backend\\.venv\\Scripts\\python.exe -m pytest backend",
+    "test:frontend": "npm --prefix frontend run test",
+    "test": "npm run test:backend && npm run test:frontend",
+    "typecheck": "npm --prefix frontend run typecheck"
+  },
+  "devDependencies": {
+    "concurrently": "9.1.0",
+    "cross-env": "7.0.3",
+    "electron": "33.2.1",
+    "electron-builder": "25.1.8",
+    "wait-on": "8.0.1"
+  },
+  "build": {
+    "appId": "com.jibinpj.aiengineeringcompanion",
+    "productName": "AI Engineering Companion",
+    "copyright": "Copyright © 2026 jibinpj-3665",
+    "directories": {
+      "output": "release",
+      "buildResources": "assets"
+    },
+    "files": [
+      "desktop/**/*",
+      "assets/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "dist-backend",
+        "to": "backend",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "assets/icon.ico",
+      "artifactName": "AI-Engineering-Companion-Setup.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "AI Engineering Companion",
+      "uninstallDisplayName": "AI Engineering Companion",
+      "installerIcon": "assets/icon.ico",
+      "uninstallerIcon": "assets/icon.ico",
+      "deleteAppDataOnUninstall": false
+    }
+  }
+}

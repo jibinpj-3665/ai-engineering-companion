@@ -1,0 +1,221 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: 220 27% 97%;
+  --foreground: 228 32% 12%;
+  --card: 0 0% 100%;
+  --panel: 220 30% 99%;
+  --border: 224 18% 88%;
+  --muted: 224 20% 94%;
+  --muted-foreground: 226 12% 42%;
+  --accent: 258 76% 57%;
+  --accent-foreground: 0 0% 100%;
+  --accent-2: 221 83% 55%;
+  --success: 158 64% 38%;
+  --warning: 35 92% 45%;
+  --danger: 0 72% 52%;
+}
+
+.dark {
+  --background: 228 48% 5%;
+  --foreground: 220 30% 96%;
+  --card: 228 38% 8%;
+  --panel: 228 36% 7%;
+  --border: 228 24% 17%;
+  --muted: 228 28% 13%;
+  --muted-foreground: 225 12% 62%;
+  --accent: 258 90% 68%;
+  --accent-foreground: 0 0% 100%;
+  --accent-2: 221 90% 65%;
+  --success: 158 64% 48%;
+  --warning: 38 92% 56%;
+  --danger: 0 78% 62%;
+}
+
+[data-accent="blue"] {
+  --accent: 221 83% 58%;
+  --accent-2: 199 89% 55%;
+}
+[data-accent="emerald"] {
+  --accent: 158 64% 44%;
+  --accent-2: 172 66% 46%;
+}
+[data-accent="rose"] {
+  --accent: 347 77% 58%;
+  --accent-2: 330 81% 60%;
+}
+[data-accent="amber"] {
+  --accent: 32 95% 52%;
+  --accent-2: 12 86% 55%;
+}
+.dark[data-accent="blue"] { --accent: 221 90% 66%; --accent-2: 199 92% 60%; }
+.dark[data-accent="emerald"] { --accent: 158 70% 52%; --accent-2: 172 70% 52%; }
+.dark[data-accent="rose"] { --accent: 347 85% 66%; --accent-2: 330 84% 66%; }
+.dark[data-accent="amber"] { --accent: 32 96% 58%; --accent-2: 12 90% 62%; }
+
+* {
+  border-color: hsl(var(--border));
+}
+
+html {
+  color-scheme: dark;
+}
+html:not(.dark) {
+  color-scheme: light;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background-color: hsl(var(--background));
+  background-image:
+    radial-gradient(1100px 560px at 12% -12%, hsl(var(--accent) / 0.15), transparent 62%),
+    radial-gradient(900px 520px at 106% -4%, hsl(var(--accent-2) / 0.12), transparent 58%),
+    radial-gradient(700px 480px at 50% 110%, hsl(var(--accent) / 0.06), transparent 60%);
+  background-attachment: fixed;
+  color: hsl(var(--foreground));
+  font-family: "Segoe UI Variable Text", "Segoe UI", Inter, system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background: hsl(var(--accent) / 0.35);
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: hsl(var(--muted-foreground) / 0.25);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--muted-foreground) / 0.45);
+  background-clip: content-box;
+}
+
+@layer components {
+  .glass-panel {
+    @apply rounded-2xl border border-border/70 bg-card/75 shadow-panel backdrop-blur-xl;
+  }
+
+  .surface {
+    @apply rounded-2xl border border-border/80 bg-card/80;
+  }
+
+  .gradient-text {
+    background: linear-gradient(105deg, hsl(var(--foreground)) 5%, hsl(var(--accent)) 55%, hsl(var(--accent-2)) 95%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+
+  .kbd {
+    @apply inline-flex h-5 min-w-5 items-center justify-center rounded-md border border-border bg-muted/80 px-1.5 font-mono text-[10px] font-medium text-muted-foreground;
+  }
+
+  .nav-item {
+    @apply relative flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium text-muted-foreground transition-all duration-200 hover:bg-muted/70 hover:text-foreground;
+  }
+
+  .nav-item-active {
+    @apply bg-primary/[0.12] text-foreground;
+  }
+
+  .nav-item-active::before {
+    content: "";
+    position: absolute;
+    left: -9px;
+    top: 9px;
+    bottom: 9px;
+    width: 3px;
+    border-radius: 999px;
+    background: hsl(var(--accent));
+    box-shadow: 0 0 14px hsl(var(--accent) / 0.75);
+  }
+
+  .label {
+    @apply mb-1.5 block text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground;
+  }
+
+  .skeleton {
+    @apply rounded-lg bg-muted/70;
+    background-image: linear-gradient(90deg, transparent, hsl(var(--foreground) / 0.06), transparent);
+    background-size: 600px 100%;
+    background-repeat: no-repeat;
+    animation: shimmer 1.8s linear infinite;
+  }
+
+  .focus-ring {
+    @apply outline-none focus-visible:ring-2 focus-visible:ring-primary/60 focus-visible:ring-offset-2 focus-visible:ring-offset-background;
+  }
+
+  .markdown-body {
+    @apply text-[0.94rem] leading-7 text-foreground/90;
+  }
+  .markdown-body h1,
+  .markdown-body h2,
+  .markdown-body h3,
+  .markdown-body h4 {
+    @apply mb-2 mt-5 font-display font-semibold tracking-tight text-foreground;
+  }
+  .markdown-body h1 { @apply text-2xl; }
+  .markdown-body h2 { @apply text-xl; }
+  .markdown-body h3 { @apply text-lg; }
+  .markdown-body p { @apply my-2.5; }
+  .markdown-body ul { @apply my-3 list-disc space-y-1.5 pl-5; }
+  .markdown-body ol { @apply my-3 list-decimal space-y-1.5 pl-5; }
+  .markdown-body strong { @apply font-semibold text-foreground; }
+  .markdown-body a { @apply text-primary underline decoration-primary/30 underline-offset-2; }
+  .markdown-body blockquote {
+    @apply my-3 rounded-r-lg border-l-2 border-primary/60 bg-primary/5 py-2 pl-4 italic text-muted-foreground;
+  }
+  .markdown-body code {
+    @apply rounded-md border border-border/70 bg-muted/80 px-1.5 py-0.5 font-mono text-[0.82em] text-foreground;
+  }
+  .markdown-body pre {
+    @apply my-4 overflow-x-auto rounded-xl border border-border bg-[#0b0e1a] p-4;
+  }
+  .markdown-body pre code {
+    @apply border-0 bg-transparent p-0 text-[0.84rem] leading-6 text-slate-100;
+  }
+  .markdown-body table {
+    @apply my-4 w-full border-collapse overflow-hidden rounded-lg text-sm;
+  }
+  .markdown-body th {
+    @apply border border-border bg-muted/70 px-3 py-2 text-left font-semibold;
+  }
+  .markdown-body td {
+    @apply border border-border px-3 py-2;
+  }
+  .markdown-body hr {
+    @apply my-5 border-border;
+  }
+  .markdown-body .katex-display {
+    @apply my-4 overflow-x-auto overflow-y-hidden py-1;
+  }
+}
+
+.text-balance {
+  text-wrap: balance;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

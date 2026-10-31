@@ -1,0 +1,44 @@
+# Dependencies
+node_modules/
+frontend/node_modules/
+backend/.venv/
+.venv/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Build output
+frontend/dist/
+dist-backend/
+release/
+build/
+backend/build/
+backend/dist/
+backend/*.spec
+
+# Runtime data and secrets
+backend/data/
+backend/uploads/
+*.db
+*.db-wal
+*.db-shm
+secret.key
+.env
+.env.local
+logs/
+backups/
+
+# Editor and OS
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Local tooling
+*.log
