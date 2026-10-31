@@ -2,6 +2,10 @@
 
 **Learn Engineering. Think Deeper. Build the Future.**
 
+[![CI](https://github.com/jibinpj-3665/ai-engineering-companion/actions/workflows/ci.yml/badge.svg)](https://github.com/jibinpj-3665/ai-engineering-companion/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/jibinpj-3665/ai-engineering-companion)](https://github.com/jibinpj-3665/ai-engineering-companion/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 A local-first Windows desktop study workspace for engineering students. Upload your notes, map your syllabus, learn through a ten-phase teaching workflow, practise with source-grounded quizzes, revise with spaced repetition, and prepare for university exams — with your data staying on your device.
 
 ![Dashboard](docs/dashboard.png)
@@ -110,7 +114,7 @@ Labs include a CodeMirror editor, saved artifacts, copy/download and optional LT
 
 ### Option A — Install the built app
 
-Run `release\AI-Engineering-Companion-Setup.exe` and follow the installer. The app is unsigned, so Windows SmartScreen may ask you to confirm the publisher. The build is reproducible from source.
+Download **AI-Engineering-Companion-Setup.exe** from [Releases](https://github.com/jibinpj-3665/ai-engineering-companion/releases/latest), or run the local build at `release\AI-Engineering-Companion-Setup.exe`, and follow the installer. The app is unsigned, so Windows SmartScreen may ask you to confirm the publisher. The build is reproducible from source.
 
 ### Option B — Run from source (development)
 
