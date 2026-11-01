@@ -9,6 +9,14 @@ def iso(value) -> Optional[str]:
 
 
 def subject_dict(subject) -> dict:
+    try:
+        assessment = json.loads(subject.assessment_json or "{}")
+    except ValueError:
+        assessment = {}
+    try:
+        books = json.loads(subject.books_json or "{}")
+    except ValueError:
+        books = {}
     return {
         "id": subject.id,
         "name": subject.name,
@@ -17,6 +25,16 @@ def subject_dict(subject) -> dict:
         "department": subject.department or "",
         "description": subject.description or "",
         "color": subject.color or "violet",
+        "academic_year": subject.academic_year or "",
+        "credits": subject.credits or 0,
+        "ltp": subject.ltp or "",
+        "preamble": subject.preamble or "",
+        "prerequisites": subject.prerequisites or "",
+        "corequisites": subject.corequisites or "",
+        "semester_source": subject.semester_source or "",
+        "assessment": assessment,
+        "books": books,
+        "syllabus_updated_at": iso(subject.syllabus_updated_at),
         "created_at": iso(subject.created_at),
     }
 
@@ -36,12 +54,63 @@ def document_dict(document, include_preview: bool = False) -> dict:
         "mime_type": document.mime_type,
         "size_bytes": document.size_bytes,
         "status": document.status,
+        "stage": document.stage or document.status,
+        "progress": int(document.progress or 0),
         "error": document.error or "",
         "page_count": document.page_count,
         "doc_kind": document.doc_kind,
+        "sha256": document.sha256 or "",
+        "source_path": document.source_path or "",
+        "source_identity": document.source_identity or "",
+        "academic_year": document.academic_year or "",
+        "semester": document.semester or "",
+        "semester_confidence": document.semester_confidence or "",
+        "import_batch_id": document.import_batch_id,
+        "version": document.version or 1,
+        "active": bool(document.active if document.active is not None else True),
         "created_at": iso(document.created_at),
         "processed_at": iso(document.processed_at),
         "preview": preview,
+    }
+
+
+def module_dict(module, topic_count: int = 0, mastered: int = 0, learned: int = 0, in_progress: int = 0, topic_ids=None) -> dict:
+    return {
+        "id": module.id,
+        "subject_id": module.subject_id,
+        "document_id": module.document_id,
+        "number": module.number,
+        "label": module.label,
+        "title": module.title,
+        "description": module.description or "",
+        "lecture_hours": module.lecture_hours or 0,
+        "tutorial_hours": module.tutorial_hours or 0,
+        "practical_hours": module.practical_hours or 0,
+        "self_study_hours": module.self_study_hours or 0,
+        "page_start": module.page_start or 0,
+        "page_end": module.page_end or 0,
+        "topic_count": topic_count,
+        "mastered": mastered,
+        "learned": learned,
+        "in_progress": in_progress,
+        "topic_ids": topic_ids or [],
+    }
+
+
+def outcome_dict(outcome) -> dict:
+    try:
+        po = json.loads(outcome.po_json or "[]")
+    except ValueError:
+        po = []
+    return {
+        "id": outcome.id,
+        "subject_id": outcome.subject_id,
+        "document_id": outcome.document_id,
+        "code": outcome.code,
+        "description": outcome.description or "",
+        "bloom_level": outcome.bloom_level or "",
+        "po_mapping": po,
+        "page": outcome.page or 0,
     }
 
 
@@ -51,7 +120,12 @@ def topic_dict(topic, subject_name: str = "") -> dict:
         "subject_id": topic.subject_id,
         "subject_name": subject_name,
         "module": topic.module,
+        "module_id": topic.module_id,
         "unit": topic.unit or "",
+        "topic_number": topic.topic_number or "",
+        "content_type": topic.content_type or "topic",
+        "source_page": topic.source_page or 0,
+        "source_document_id": topic.source_document_id,
         "title": topic.title,
         "description": topic.description or "",
         "learning_outcome": topic.learning_outcome or "",

@@ -10,6 +10,7 @@ import {
   GraduationCap,
   Layers,
   LayoutDashboard,
+  LibraryBig,
   ListTree,
   MessagesSquare,
   PencilRuler,
@@ -28,6 +29,7 @@ const groups = [
       { to: "/subjects", label: "Subjects", icon: BookOpen },
       { to: "/documents", label: "Knowledge Base", icon: Files },
       { to: "/syllabus", label: "Syllabus", icon: ListTree },
+      { to: "/syllabus-library", label: "Syllabus Library", icon: LibraryBig },
     ],
   },
   {
@@ -62,7 +64,7 @@ export function Sidebar({
   onMobileClose: () => void;
 }) {
   const navigate = useNavigate();
-  const { settings } = useApp();
+  const { settings, user } = useApp();
 
   const body = (
     <div className="flex h-full flex-col">
@@ -120,7 +122,7 @@ export function Sidebar({
         {!collapsed ? (
           <div className="mt-2 rounded-xl border border-border/70 bg-muted/30 px-3 py-2.5">
             <p className="truncate text-xs font-medium">{settings?.student_name || "Engineer"}</p>
-            <p className="text-[10px] text-muted-foreground">Local workspace · v1.0.0</p>
+            <p className="text-[10px] text-muted-foreground">{user ? user.email : "Local workspace"}{" \u00b7 v1.3.0"}</p>
           </div>
         ) : null}
         <button

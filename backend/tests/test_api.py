@@ -1,6 +1,8 @@
+import base64
 import io
 import zipfile
 
+from app.ai.rag import annotate_citations
 from tests.conftest import upload_text
 
 NOTES = """
@@ -39,6 +41,20 @@ Module 3: Digital Filters
 3.2 IIR filter design
 3.3 Realization structures and quantization effects
 """
+
+
+def test_citation_annotator_accepts_grouped_and_range_labels():
+    sources = [{"index": index} for index in range(1, 5)]
+    annotated, info = annotate_citations(
+        "Grounded claim [S1, S2]. Another claim [S3\u2013S4]. Invalid [S9].",
+        sources,
+    )
+    assert info == {
+        "labels": ["S1", "S2", "S3", "S4"],
+        "unknown_labels": ["S9"],
+        "uncited": False,
+    }
+    assert all(source["cited"] for source in annotated)
 
 
 def test_health(client):
@@ -199,9 +215,9 @@ def test_settings_ai_status_and_backup(client):
     assert status.status_code == 200
     assert status.json()["provider"] == "offline"
 
-    updated = client.put("/api/settings", json={"student_name": "Jibin", "ai_provider": "offline", "daily_goal_minutes": "90"})
+    updated = client.put("/api/settings", json={"student_name": "Test Student", "ai_provider": "offline", "daily_goal_minutes": "90"})
     assert updated.status_code == 200
-    assert updated.json()["student_name"] == "Jibin"
+    assert updated.json()["student_name"] == "Test Student"
     assert updated.json()["ai_configured"] is False
 
     backup = client.post("/api/backup")
@@ -210,7 +226,13 @@ def test_settings_ai_status_and_backup(client):
     download = client.get("/api/backup/download")
     assert download.status_code == 200
     with zipfile.ZipFile(io.BytesIO(download.content)) as archive:
-        assert "aec.db" in archive.namelist()
+        names = archive.namelist()
+        assert "manifest.json" in names
+        assert "data.json" in names
+        assert "aec.db" not in names
+        manifest = __import__("json").loads(archive.read("manifest.json"))
+        assert manifest["format"] == "aec-backup-v2"
+        assert manifest["credentials_excluded"] is True
 
     notification = client.get("/api/notifications")
     assert notification.status_code == 200
@@ -236,3 +258,30 @@ def test_persistence_across_client_restart(client, subject):
         assert any(item["id"] == subject["id"] for item in subjects)
         health = fresh.get("/api/health")
         assert health.status_code == 200
+
+
+def test_web_security_headers(client):
+    response = client.get("/api/health")
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["x-frame-options"] == "DENY"
+    assert response.headers["cache-control"] == "no-store"
+
+
+def test_optional_web_password(client, monkeypatch):
+    monkeypatch.setenv("AEC_WEB_USER", "student")
+    monkeypatch.setenv("AEC_WEB_PASSWORD", "correct-horse")
+
+    blocked = client.get("/api/subjects")
+    assert blocked.status_code == 401
+    assert blocked.headers["www-authenticate"].startswith("Basic")
+
+    public_health = client.get("/api/health")
+    assert public_health.status_code == 200
+    assert public_health.headers["x-content-type-options"] == "nosniff"
+
+    bad_token = base64.b64encode(b"student:wrong-password").decode("ascii")
+    assert client.get("/api/subjects", headers={"Authorization": f"Basic {bad_token}"}).status_code == 401
+
+    token = base64.b64encode(b"student:correct-horse").decode("ascii")
+    allowed = client.get("/api/subjects", headers={"Authorization": f"Basic {token}"})
+    assert allowed.status_code == 200

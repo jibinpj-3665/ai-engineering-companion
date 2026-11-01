@@ -15,7 +15,7 @@ export function Topbar({
   onOpenNotifications: () => void;
   onOpenMobile: () => void;
 }) {
-  const { settings, setSettings, notifications, aiStatus } = useApp();
+  const { settings, setSettings, notifications, aiStatus, user } = useApp();
   const navigate = useNavigate();
   const { toast } = useToast();
   const unread = notifications.filter((item) => !item.read).length;
@@ -65,7 +65,7 @@ export function Topbar({
             title={aiStatus?.message}
           >
             {aiStatus?.configured ? <Zap size={11} /> : <WifiOff size={11} />}
-            {aiStatus?.configured ? "AI ready" : "Offline mode"}
+            {aiStatus?.configured ? "AI ready" : "Offline retrieval"}
           </Link>
 
           <Button variant="ghost" size="icon" onClick={toggleTheme} aria-label="Toggle theme">
@@ -91,10 +91,10 @@ export function Topbar({
             aria-label="Profile settings"
           >
             <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-[linear-gradient(135deg,hsl(var(--accent)),hsl(var(--accent-2)))] text-[11px] font-bold text-white">
-              {initials(settings?.student_name || "Engineer")}
+              {initials(user?.name || settings?.student_name || "Engineer")}
             </span>
             <span className="hidden text-left md:block">
-              <span className="block max-w-28 truncate text-xs font-semibold leading-4">{settings?.student_name || "Engineer"}</span>
+              <span className="block max-w-28 truncate text-xs font-semibold leading-4">{user?.name || settings?.student_name || "Engineer"}</span>
               <span className="flex items-center gap-1 text-[10px] text-muted-foreground"><Settings2 size={9} /> Settings</span>
             </span>
           </button>

@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from ..database import get_db
+from ..database import current_user_id, get_db
 from ..labs import LAB_INDEX, LABS
 from ..models import LabArtifact, utcnow
 
@@ -30,12 +30,21 @@ def list_labs():
     ]
 
 
+def _artifact(db: Session, slug: str) -> tuple[LabArtifact | None, str]:
+    uid = current_user_id.get()
+    scoped = f"u{uid}:{slug}" if uid is not None else slug
+    artifact = db.query(LabArtifact).filter(LabArtifact.lab_slug == scoped).first()
+    if not artifact:
+        artifact = db.query(LabArtifact).filter(LabArtifact.lab_slug == slug).first()
+    return artifact, scoped
+
+
 @router.get("/{slug}")
 def get_lab(slug: str, db: Session = Depends(get_db)):
     lab = LAB_INDEX.get(slug)
     if not lab:
         raise HTTPException(status_code=404, detail="Lab not found")
-    artifact = db.query(LabArtifact).filter(LabArtifact.lab_slug == slug).first()
+    artifact, _ = _artifact(db, slug)
     return {
         **lab,
         "disclaimer": "All experiments are educational simulations. Nothing is reported as hardware-tested unless you personally executed it on physical equipment.",
@@ -49,9 +58,9 @@ def get_lab(slug: str, db: Session = Depends(get_db)):
 def save_artifact(slug: str, payload: ArtifactRequest, db: Session = Depends(get_db)):
     if slug not in LAB_INDEX:
         raise HTTPException(status_code=404, detail="Lab not found")
-    artifact = db.query(LabArtifact).filter(LabArtifact.lab_slug == slug).first()
+    artifact, scoped = _artifact(db, slug)
     if not artifact:
-        artifact = LabArtifact(lab_slug=slug, code=payload.code, language=payload.language)
+        artifact = LabArtifact(lab_slug=scoped, code=payload.code, language=payload.language)
         db.add(artifact)
     else:
         artifact.code = payload.code

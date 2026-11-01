@@ -7,6 +7,8 @@ import { Sidebar } from "./Sidebar";
 import { Topbar } from "./Topbar";
 import { CommandPalette } from "./CommandPalette";
 import { NotificationsPanel } from "./NotificationsPanel";
+import { MobileNav } from "./MobileNav";
+import { PwaManager } from "../pwa/PwaManager";
 import { PageLoader } from "../ui/Spinner";
 
 export function AppShell() {
@@ -65,7 +67,7 @@ export function AppShell() {
             </div>
           </div>
         ) : null}
-        <main className="flex-1 px-4 py-6 sm:px-6 lg:px-8">
+        <main className="flex-1 px-4 pb-24 pt-6 sm:px-6 lg:px-8 lg:pb-8">
           <AnimatePresence mode="wait">
             <motion.div
               key={location.pathname}
@@ -82,6 +84,8 @@ export function AppShell() {
       </div>
       <CommandPalette open={searchOpen} onClose={() => setSearchOpen(false)} />
       <NotificationsPanel open={notificationsOpen} onClose={() => setNotificationsOpen(false)} />
+      <MobileNav />
+      <PwaManager />
     </div>
   );
 }

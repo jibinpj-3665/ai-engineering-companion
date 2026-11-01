@@ -20,7 +20,64 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
-class Subject(Base):
+class TenantMixin:
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True)
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True)
+    email = Column(String(320), unique=True, nullable=False, index=True)
+    name = Column(String(200), default="Engineer")
+    password_hash = Column(String(300), default="")
+    is_local = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=utcnow)
+    last_login_at = Column(DateTime, nullable=True)
+    password_changed_at = Column(DateTime, nullable=True)
+
+
+class UserSession(Base):
+    __tablename__ = "user_sessions"
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    token_hash = Column(String(128), unique=True, nullable=False, index=True)
+    created_at = Column(DateTime, default=utcnow)
+    last_seen_at = Column(DateTime, default=utcnow)
+    expires_at = Column(DateTime, nullable=False, index=True)
+    user_agent = Column(String(300), default="")
+    ip_address = Column(String(80), default="")
+
+
+class PasswordResetToken(Base):
+    __tablename__ = "password_reset_tokens"
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    token_hash = Column(String(128), unique=True, nullable=False, index=True)
+    created_at = Column(DateTime, default=utcnow)
+    expires_at = Column(DateTime, nullable=False)
+    used_at = Column(DateTime, nullable=True)
+
+
+class AIUsageLog(Base):
+    __tablename__ = "ai_usage_logs"
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    provider = Column(String(40), default="")
+    model = Column(String(120), default="")
+    operation = Column(String(40), default="chat")
+    status = Column(String(20), default="ok")
+    input_chars = Column(Integer, default=0)
+    output_chars = Column(Integer, default=0)
+    latency_ms = Column(Integer, default=0)
+    error = Column(Text, default="")
+    created_at = Column(DateTime, default=utcnow)
+
+
+class Subject(TenantMixin, Base):
     __tablename__ = "subjects"
 
     id = Column(Integer, primary_key=True)
@@ -30,14 +87,44 @@ class Subject(Base):
     department = Column(String(120), default="")
     description = Column(Text, default="")
     color = Column(String(20), default="violet")
+    academic_year = Column(String(40), default="")
+    credits = Column(Integer, default=0)
+    ltp = Column(String(40), default="")
+    preamble = Column(Text, default="")
+    prerequisites = Column(Text, default="")
+    corequisites = Column(Text, default="")
+    semester_source = Column(String(30), default="")
+    assessment_json = Column(Text, default="{}")
+    books_json = Column(Text, default="{}")
+    syllabus_updated_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=utcnow)
 
     documents = relationship("Document", back_populates="subject", cascade="all, delete-orphan")
     topics = relationship("SyllabusTopic", back_populates="subject", cascade="all, delete-orphan")
+    modules = relationship("SyllabusModule", back_populates="subject", cascade="all, delete-orphan")
+    outcomes = relationship("SyllabusCourseOutcome", back_populates="subject", cascade="all, delete-orphan")
     exams = relationship("Exam", back_populates="subject", cascade="all, delete-orphan")
 
 
-class Document(Base):
+class SyllabusImportBatch(TenantMixin, Base):
+    __tablename__ = "syllabus_import_batches"
+
+    id = Column(Integer, primary_key=True)
+    source_root = Column(String(1000), default="")
+    status = Column(String(20), default="discovering", index=True)
+    total_files = Column(Integer, default=0)
+    imported_files = Column(Integer, default=0)
+    duplicate_files = Column(Integer, default=0)
+    unsupported_files = Column(Integer, default=0)
+    skipped_files = Column(Integer, default=0)
+    failed_files = Column(Integer, default=0)
+    manifest_json = Column(Text, default="[]")
+    error = Column(Text, default="")
+    created_at = Column(DateTime, default=utcnow)
+    completed_at = Column(DateTime, nullable=True)
+
+
+class Document(TenantMixin, Base):
     __tablename__ = "documents"
 
     id = Column(Integer, primary_key=True)
@@ -47,10 +134,21 @@ class Document(Base):
     mime_type = Column(String(120), default="application/octet-stream")
     size_bytes = Column(Integer, default=0)
     status = Column(String(20), default="queued", index=True)
+    stage = Column(String(40), default="queued")
+    progress = Column(Integer, default=0)
     error = Column(Text, default="")
     page_count = Column(Integer, default=0)
     doc_kind = Column(String(30), default="notes")
     pages_json = Column(Text, default="[]")
+    sha256 = Column(String(64), default="", index=True)
+    source_path = Column(Text, default="")
+    source_identity = Column(String(1000), default="")
+    academic_year = Column(String(40), default="")
+    semester = Column(String(40), default="")
+    semester_confidence = Column(String(30), default="")
+    import_batch_id = Column(Integer, ForeignKey("syllabus_import_batches.id", ondelete="SET NULL"), nullable=True)
+    version = Column(Integer, default=1)
+    active = Column(Boolean, default=True, index=True)
     created_at = Column(DateTime, default=utcnow)
     processed_at = Column(DateTime, nullable=True)
 
@@ -58,7 +156,44 @@ class Document(Base):
     chunks = relationship("DocumentChunk", back_populates="document", cascade="all, delete-orphan")
 
 
-class DocumentChunk(Base):
+class SyllabusModule(TenantMixin, Base):
+    __tablename__ = "syllabus_modules"
+
+    id = Column(Integer, primary_key=True)
+    subject_id = Column(Integer, ForeignKey("subjects.id", ondelete="CASCADE"), nullable=False, index=True)
+    document_id = Column(Integer, ForeignKey("documents.id", ondelete="SET NULL"), nullable=True)
+    number = Column(Integer, default=1)
+    label = Column(String(80), default="")
+    title = Column(String(300), default="")
+    description = Column(Text, default="")
+    lecture_hours = Column(Integer, default=0)
+    tutorial_hours = Column(Integer, default=0)
+    practical_hours = Column(Integer, default=0)
+    self_study_hours = Column(Integer, default=0)
+    page_start = Column(Integer, default=1)
+    page_end = Column(Integer, default=1)
+    created_at = Column(DateTime, default=utcnow)
+
+    subject = relationship("Subject", back_populates="modules")
+
+
+class SyllabusCourseOutcome(TenantMixin, Base):
+    __tablename__ = "syllabus_course_outcomes"
+
+    id = Column(Integer, primary_key=True)
+    subject_id = Column(Integer, ForeignKey("subjects.id", ondelete="CASCADE"), nullable=False, index=True)
+    document_id = Column(Integer, ForeignKey("documents.id", ondelete="SET NULL"), nullable=True)
+    code = Column(String(20), default="CO1")
+    description = Column(Text, default="")
+    bloom_level = Column(String(60), default="")
+    po_json = Column(Text, default="{}")
+    page = Column(Integer, default=1)
+    created_at = Column(DateTime, default=utcnow)
+
+    subject = relationship("Subject", back_populates="outcomes")
+
+
+class DocumentChunk(TenantMixin, Base):
     __tablename__ = "chunks"
 
     id = Column(Integer, primary_key=True)
@@ -74,13 +209,16 @@ class DocumentChunk(Base):
     document = relationship("Document", back_populates="chunks")
 
 
-class SyllabusTopic(Base):
+class SyllabusTopic(TenantMixin, Base):
     __tablename__ = "syllabus_topics"
 
     id = Column(Integer, primary_key=True)
     subject_id = Column(Integer, ForeignKey("subjects.id", ondelete="CASCADE"), index=True)
     module = Column(String(120), default="General")
+    module_id = Column(Integer, ForeignKey("syllabus_modules.id", ondelete="SET NULL"), nullable=True)
     unit = Column(String(120), default="")
+    topic_number = Column(String(20), default="")
+    content_type = Column(String(30), default="topic")
     title = Column(String(300), nullable=False)
     description = Column(Text, default="")
     learning_outcome = Column(Text, default="")
@@ -90,6 +228,7 @@ class SyllabusTopic(Base):
     marks = Column(Integer, default=0)
     exam_frequency = Column(Float, default=0.0)
     source_document_id = Column(Integer, ForeignKey("documents.id", ondelete="SET NULL"), nullable=True)
+    source_page = Column(Integer, default=0)
     status = Column(String(20), default="not_started", index=True)
     mastery_score = Column(Float, default=0.0)
     last_studied_at = Column(DateTime, nullable=True)
@@ -99,7 +238,7 @@ class SyllabusTopic(Base):
     subject = relationship("Subject", back_populates="topics")
 
 
-class TeachingSession(Base):
+class TeachingSession(TenantMixin, Base):
     __tablename__ = "teaching_sessions"
 
     id = Column(Integer, primary_key=True)
@@ -112,7 +251,7 @@ class TeachingSession(Base):
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
 
 
-class Conversation(Base):
+class Conversation(TenantMixin, Base):
     __tablename__ = "conversations"
 
     id = Column(Integer, primary_key=True)
@@ -125,7 +264,7 @@ class Conversation(Base):
     messages = relationship("Message", back_populates="conversation", cascade="all, delete-orphan")
 
 
-class Message(Base):
+class Message(TenantMixin, Base):
     __tablename__ = "messages"
 
     id = Column(Integer, primary_key=True)
@@ -139,7 +278,7 @@ class Message(Base):
     conversation = relationship("Conversation", back_populates="messages")
 
 
-class Quiz(Base):
+class Quiz(TenantMixin, Base):
     __tablename__ = "quizzes"
 
     id = Column(Integer, primary_key=True)
@@ -155,7 +294,7 @@ class Quiz(Base):
     questions = relationship("QuizQuestion", back_populates="quiz", cascade="all, delete-orphan")
 
 
-class QuizQuestion(Base):
+class QuizQuestion(TenantMixin, Base):
     __tablename__ = "quiz_questions"
 
     id = Column(Integer, primary_key=True)
@@ -172,7 +311,7 @@ class QuizQuestion(Base):
     quiz = relationship("Quiz", back_populates="questions")
 
 
-class QuizAttempt(Base):
+class QuizAttempt(TenantMixin, Base):
     __tablename__ = "quiz_attempts"
 
     id = Column(Integer, primary_key=True)
@@ -189,7 +328,7 @@ class QuizAttempt(Base):
     completed_at = Column(DateTime, default=utcnow)
 
 
-class Flashcard(Base):
+class Flashcard(TenantMixin, Base):
     __tablename__ = "flashcards"
 
     id = Column(Integer, primary_key=True)
@@ -208,7 +347,7 @@ class Flashcard(Base):
     created_at = Column(DateTime, default=utcnow)
 
 
-class StudySession(Base):
+class StudySession(TenantMixin, Base):
     __tablename__ = "study_sessions"
 
     id = Column(Integer, primary_key=True)
@@ -221,7 +360,7 @@ class StudySession(Base):
     notes = Column(Text, default="")
 
 
-class Exam(Base):
+class Exam(TenantMixin, Base):
     __tablename__ = "exams"
 
     id = Column(Integer, primary_key=True)
@@ -235,7 +374,7 @@ class Exam(Base):
     subject = relationship("Subject", back_populates="exams")
 
 
-class ScheduleSession(Base):
+class ScheduleSession(TenantMixin, Base):
     __tablename__ = "schedule_sessions"
 
     id = Column(Integer, primary_key=True)
@@ -250,21 +389,21 @@ class ScheduleSession(Base):
     created_at = Column(DateTime, default=utcnow)
 
 
-class Preference(Base):
+class Preference(TenantMixin, Base):
     __tablename__ = "preferences"
 
     key = Column(String(80), primary_key=True)
     value = Column(Text, default="")
 
 
-class Secret(Base):
+class Secret(TenantMixin, Base):
     __tablename__ = "secrets"
 
     key = Column(String(80), primary_key=True)
     encrypted_value = Column(Text, default="")
 
 
-class Notification(Base):
+class Notification(TenantMixin, Base):
     __tablename__ = "notifications"
 
     id = Column(Integer, primary_key=True)
@@ -275,7 +414,7 @@ class Notification(Base):
     created_at = Column(DateTime, default=utcnow)
 
 
-class SavedQuestion(Base):
+class SavedQuestion(TenantMixin, Base):
     __tablename__ = "saved_questions"
 
     id = Column(Integer, primary_key=True)
@@ -289,7 +428,7 @@ class SavedQuestion(Base):
     created_at = Column(DateTime, default=utcnow)
 
 
-class LabArtifact(Base):
+class LabArtifact(TenantMixin, Base):
     __tablename__ = "lab_artifacts"
 
     id = Column(Integer, primary_key=True)

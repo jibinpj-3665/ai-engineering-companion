@@ -1,18 +1,29 @@
 import type {
   AIStatus,
+  AIUsageResponse,
   AnalyticsData,
+  AuthStatus,
+  AuthUser,
   ChatResponse,
   ConversationDetail,
   ConversationSummary,
   Coverage,
   DashboardData,
+  DocumentCapabilities,
   DocumentRecord,
+  EvaluationResult,
+  LibraryBatch,
+  LibraryOverview,
+  LibrarySearch,
+  LibrarySubjectDetail,
   Exam,
   Flashcard,
   LabDetail,
   LabSummary,
+  ModelList,
   Notification,
   PhaseInfo,
+  ProviderList,
   Quiz,
   QuizAttempt,
   RevisionStats,
@@ -30,11 +41,19 @@ const BASE = import.meta.env.VITE_API_BASE || "";
 
 export class ApiError extends Error {
   status: number;
-  constructor(message: string, status: number) {
+  authRequired: boolean;
+  constructor(message: string, status: number, authRequired = false) {
     super(message);
     this.name = "ApiError";
     this.status = status;
+    this.authRequired = authRequired;
   }
+}
+
+function unauthorized(payload: { detail?: unknown; auth_required?: unknown }) {
+  window.dispatchEvent(new CustomEvent("aec:unauthorized", {
+    detail: { detail: typeof payload.detail === "string" ? payload.detail : "", authRequired: Boolean(payload.auth_required) },
+  }));
 }
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -42,17 +61,22 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   if (init.body && !(init.body instanceof FormData)) {
     headers.set("Content-Type", "application/json");
   }
-  const response = await fetch(`${BASE}/api${path}`, { ...init, headers });
+  const response = await fetch(`${BASE}/api${path}`, { ...init, headers, credentials: "include" });
   if (!response.ok) {
     let detail = `Request failed (${response.status})`;
+    let authRequired = response.status === 401;
     try {
       const data = await response.json();
       if (typeof data.detail === "string") detail = data.detail;
       else if (Array.isArray(data.detail)) detail = data.detail.map((item: { msg: string }) => item.msg).join(", ");
+      if (response.status === 401) {
+        unauthorized(data);
+        authRequired = Boolean(data.auth_required);
+      }
     } catch {
       /* ignore */
     }
-    throw new ApiError(detail, response.status);
+    throw new ApiError(detail, response.status, authRequired);
   }
   if (response.status === 204) return undefined as T;
   return (await response.json()) as T;
@@ -61,6 +85,21 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 const json = (body: unknown): RequestInit => ({ method: "POST", body: JSON.stringify(body) });
 
 export const api = {
+  authStatus: () => request<AuthStatus>("/auth/status"),
+  login: (email: string, password: string) =>
+    request<{ ok: boolean; user: AuthUser }>("/auth/login", json({ email, password })),
+  register: (name: string, email: string, password: string) =>
+    request<{ ok: boolean; user: AuthUser }>("/auth/register", json({ name, email, password })),
+  logout: () => request<{ ok: boolean }>("/auth/logout", { method: "POST" }),
+  me: () => request<AuthUser>("/auth/me"),
+  updateProfile: (name: string) => request<AuthUser>("/auth/profile", { method: "PATCH", body: JSON.stringify({ name }) }),
+  changePassword: (currentPassword: string, newPassword: string) =>
+    request<{ ok: boolean; message: string }>("/auth/password", json({ current_password: currentPassword, new_password: newPassword })),
+  requestPasswordReset: (email: string) =>
+    request<{ ok: boolean; message: string }>("/auth/password-reset/request", json({ email })),
+  confirmPasswordReset: (token: string, newPassword: string) =>
+    request<{ ok: boolean; message: string }>("/auth/password-reset/confirm", json({ token, new_password: newPassword })),
+
   dashboard: () => request<DashboardData>("/dashboard"),
   analytics: () => request<AnalyticsData>("/analytics"),
 
@@ -76,13 +115,10 @@ export const api = {
   document: (id: number) => request<DocumentRecord>(`/documents/${id}`),
   documentPages: (id: number) =>
     request<{ document: DocumentRecord; pages: { page: number; text: string; heading: string }[] }>(`/documents/${id}/pages`),
-  uploadDocument: (file: File, subjectId?: number, docKind?: string) => {
-    const form = new FormData();
-    form.append("file", file);
-    if (subjectId) form.append("subject_id", String(subjectId));
-    if (docKind) form.append("doc_kind", docKind);
-    return request<DocumentRecord>("/documents/upload", { method: "POST", body: form });
-  },
+  documentCapabilities: () => request<DocumentCapabilities>("/documents/capabilities"),
+  documentDownloadUrl: (id: number) => `${BASE}/api/documents/${id}/download`,
+  uploadDocument: (file: File, subjectId?: number, docKind?: string, onProgress?: (percent: number) => void) =>
+    uploadWithProgress(file, subjectId, docKind, onProgress),
   deleteDocument: (id: number) => request<{ ok: boolean }>(`/documents/${id}`, { method: "DELETE" }),
   reprocessDocument: (id: number) => request<DocumentRecord>(`/documents/${id}/reprocess`, { method: "POST" }),
   searchDocuments: (query: string, subjectId?: number, topK = 8) =>
@@ -100,9 +136,24 @@ export const api = {
     request<Topic>(`/syllabus/topics/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   deleteTopic: (id: number) => request<{ ok: boolean }>(`/syllabus/topics/${id}`, { method: "DELETE" }),
   coverage: (subjectId: number) => request<Coverage>(`/syllabus/coverage/${subjectId}`),
+  library: () => request<LibraryOverview>("/syllabus/library"),
+  librarySubject: (subjectId: number) => request<LibrarySubjectDetail>(`/syllabus/library/subjects/${subjectId}`),
+  librarySearch: (query: string) => request<LibrarySearch>(`/syllabus/library/search?q=${encodeURIComponent(query)}`),
+  libraryImport: (path: string) => request<LibraryBatch>("/syllabus/library/import", json({ path })),
+  libraryImports: () => request<LibraryBatch[]>("/syllabus/library/imports"),
+  libraryBatch: (id: number) => request<LibraryBatch>(`/syllabus/library/imports/${id}`),
+  libraryUnindex: (documentId: number) => request<DocumentRecord>(`/syllabus/library/documents/${documentId}/unindex`, { method: "POST" }),
+  libraryReparse: (documentId: number) => request<Record<string, unknown>>(`/syllabus/library/documents/${documentId}/reparse`, { method: "POST" }),
+  libraryRebuild: () => request<{ count: number; failed: number; note: string }>("/syllabus/library/rebuild", { method: "POST" }),
+  libraryManifestUrl: () => `${BASE}/api/syllabus/library/manifest`,
 
   aiStatus: () => request<AIStatus>("/ai/status"),
   testAI: () => request<{ ok: boolean; provider: string; message: string }>("/ai/test", { method: "POST" }),
+  aiProviders: () => request<ProviderList>("/ai/providers"),
+  aiModels: () => request<ModelList>("/ai/models", { method: "POST" }),
+  aiUsage: (limit = 30) => request<AIUsageResponse>(`/ai/usage?limit=${limit}`),
+  evaluateAnswer: (body: { question: string; answer: string; subject_id?: number; topic_id?: number }) =>
+    request<EvaluationResult>("/ai/evaluate", json(body)),
   conversations: (subjectId?: number) =>
     request<ConversationSummary[]>(`/ai/conversations${subjectId ? `?subject_id=${subjectId}` : ""}`),
   conversation: (id: number) => request<ConversationDetail>(`/ai/conversations/${id}`),
@@ -117,6 +168,14 @@ export const api = {
     personality?: string;
     mode?: string;
   }) => request<ChatResponse>("/ai/chat", json(body)),
+  chatStream: (body: {
+    message: string;
+    conversation_id?: number;
+    subject_id?: number;
+    topic_id?: number;
+    personality?: string;
+    mode?: string;
+  }, handlers: StreamHandlers, signal?: AbortSignal) => streamChat(body, handlers, signal),
 
   phases: () => request<PhaseInfo[]>("/teaching/phases"),
   topicProgress: (topicId: number) => request<TopicProgress>(`/teaching/${topicId}/progress`),
@@ -192,6 +251,132 @@ export const api = {
   restoreBackup: (file: File) => {
     const form = new FormData();
     form.append("file", file);
-    return request<{ ok: boolean; message: string; reload: boolean }>("/backup/restore", { method: "POST", body: form });
+    return request<{ ok: boolean; message: string; reload: boolean; counts?: Record<string, number> }>("/backup/restore", { method: "POST", body: form });
   },
 };
+
+interface StreamMeta {
+  conversation_id: number;
+  conversation_title: string;
+  generator: string;
+  sources: import("./types").Source[];
+  user_message_id: number;
+  mode: string;
+}
+
+interface StreamDone {
+  message_id: number;
+  conversation_id: number;
+  conversation_title: string;
+  generator: string;
+  note: string;
+  sources: import("./types").Source[];
+  citations?: import("./types").CitationInfo;
+}
+
+export interface StreamHandlers {
+  onMeta?: (meta: StreamMeta) => void;
+  onDelta?: (text: string) => void;
+  onError?: (detail: string) => void;
+  onDone?: (done: StreamDone) => void;
+}
+
+function uploadWithProgress(
+  file: File,
+  subjectId: number | undefined,
+  docKind: string | undefined,
+  onProgress?: (percent: number) => void,
+): Promise<DocumentRecord> {
+  return new Promise((resolve, reject) => {
+    const form = new FormData();
+    form.append("file", file);
+    if (subjectId) form.append("subject_id", String(subjectId));
+    if (docKind) form.append("doc_kind", docKind);
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", `${BASE}/api/documents/upload`);
+    xhr.withCredentials = true;
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable && onProgress) onProgress(Math.round((event.loaded / event.total) * 100));
+    };
+    xhr.onerror = () => reject(new ApiError("Could not reach the backend while uploading.", 0));
+    xhr.onload = () => {
+      let payload: unknown = null;
+      try { payload = JSON.parse(xhr.responseText); } catch { /* ignore */ }
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(payload as DocumentRecord);
+        return;
+      }
+      const data = payload as { detail?: unknown; auth_required?: unknown } | null;
+      const detail = typeof data?.detail === "string" ? data.detail : `Upload failed (${xhr.status})`;
+      if (xhr.status === 401 && data) unauthorized(data);
+      reject(new ApiError(detail, xhr.status, xhr.status === 401));
+    };
+    xhr.send(form);
+  });
+}
+
+async function streamChat(
+  body: {
+    message: string;
+    conversation_id?: number;
+    subject_id?: number;
+    topic_id?: number;
+    personality?: string;
+    mode?: string;
+  },
+  handlers: StreamHandlers,
+  signal?: AbortSignal,
+) {
+  const response = await fetch(`${BASE}/api/ai/chat/stream`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    credentials: "include",
+    signal,
+  });
+  if (!response.ok) {
+    let detail = `Request failed (${response.status})`;
+    let authRequired = response.status === 401;
+    try {
+      const data = await response.json();
+      if (typeof data.detail === "string") detail = data.detail;
+      if (response.status === 401) {
+        unauthorized(data);
+        authRequired = Boolean(data.auth_required);
+      }
+    } catch { /* ignore */ }
+    throw new ApiError(detail, response.status, authRequired);
+  }
+  if (!response.body) throw new ApiError("Streaming is not supported by this browser.", 0);
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let boundary = buffer.indexOf("\n\n");
+      while (boundary >= 0) {
+        const block = buffer.slice(0, boundary);
+        buffer = buffer.slice(boundary + 2);
+        boundary = buffer.indexOf("\n\n");
+        let event = "message";
+        const dataLines: string[] = [];
+        for (const line of block.split("\n")) {
+          if (line.startsWith("event:")) event = line.slice(6).trim();
+          else if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
+        }
+        if (!dataLines.length) continue;
+        let payload: Record<string, unknown>;
+        try { payload = JSON.parse(dataLines.join("\n")); } catch { continue; }
+        if (event === "meta") handlers.onMeta?.(payload as unknown as StreamMeta);
+        else if (event === "delta" && typeof payload.text === "string") handlers.onDelta?.(payload.text);
+        else if (event === "error") handlers.onError?.(String(payload.detail || "AI provider error"));
+        else if (event === "done") handlers.onDone?.(payload as unknown as StreamDone);
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}

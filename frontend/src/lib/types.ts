@@ -6,11 +6,23 @@ export interface Subject {
   department: string;
   description: string;
   color: string;
+  academic_year?: string;
+  credits?: number;
+  ltp?: string;
+  preamble?: string;
+  prerequisites?: string;
+  corequisites?: string;
+  semester_source?: string;
+  assessment?: Record<string, unknown>;
+  books?: Record<string, string[]>;
+  syllabus_updated_at?: string | null;
   created_at: string;
   topic_count?: number;
   mastered_count?: number;
   document_count?: number;
 }
+
+export type DocumentStatus = "uploading" | "queued" | "processing" | "extracting" | "indexing" | "ready" | "unindexed" | "failed";
 
 export interface DocumentRecord {
   id: number;
@@ -18,13 +30,31 @@ export interface DocumentRecord {
   filename: string;
   mime_type: string;
   size_bytes: number;
-  status: "queued" | "processing" | "ready" | "failed";
+  status: DocumentStatus;
+  stage: string;
+  progress: number;
   error: string;
   page_count: number;
   doc_kind: string;
+  sha256?: string;
+  source_path?: string;
+  source_identity?: string;
+  academic_year?: string;
+  semester?: string;
+  semester_confidence?: string;
+  import_batch_id?: number | null;
+  version?: number;
+  active?: boolean;
   created_at: string;
   processed_at: string | null;
   preview: { page: number; text: string }[];
+}
+
+export interface DocumentCapabilities {
+  ocr_available: boolean;
+  max_upload_mb: number;
+  allowed_extensions: string[];
+  note: string;
 }
 
 export interface Topic {
@@ -32,7 +62,12 @@ export interface Topic {
   subject_id: number;
   subject_name: string;
   module: string;
+  module_id?: number | null;
   unit: string;
+  topic_number?: string;
+  content_type?: string;
+  source_page?: number;
+  source_document_id?: number | null;
   title: string;
   description: string;
   learning_outcome: string;
@@ -49,12 +84,20 @@ export interface Topic {
 
 export interface Source {
   index?: number;
+  label?: string;
+  cited?: boolean;
   document: string;
   document_id?: number;
   page: number;
   heading?: string;
   snippet: string;
   score?: number;
+}
+
+export interface CitationInfo {
+  labels: string[];
+  unknown_labels: string[];
+  uncited: boolean;
 }
 
 export interface SearchResult {
@@ -174,10 +217,24 @@ export interface DashboardData {
     exam_readiness: number;
   };
   subjects: SubjectProgress[];
+  semesters?: SemesterProgress[];
   daily: DayPoint[];
   weak_topics: WeakTopic[];
   revision: RevisionStats;
   has_data: boolean;
+}
+
+export interface SemesterProgress {
+  semester: string;
+  academic_year: string;
+  subjects: number;
+  modules: number;
+  topics: number;
+  mastered: number;
+  learned: number;
+  in_progress: number;
+  completion: number;
+  credits: number;
 }
 
 export interface AnalyticsData {
@@ -313,7 +370,7 @@ export interface Notification {
 }
 
 export interface Settings {
-  ai_provider: "offline" | "openai" | "openai_compatible" | "local";
+  ai_provider: string;
   ai_base_url: string;
   ai_api_key: string;
   ai_model: string;
@@ -334,12 +391,18 @@ export interface Settings {
   ai_configured?: boolean;
   effective_base_url?: string;
   effective_model?: string;
+  key_source?: "environment" | "account" | "none";
+  env_key_set?: boolean;
+  env_keys_only?: boolean;
 }
 
 export interface AIStatus {
   provider: string;
   configured: boolean;
   model: string;
+  base_url?: string;
+  key_source?: string;
+  env_key_set?: boolean;
   embedding_provider: string;
   indexed_chunks: number;
   ready_documents: number;
@@ -378,7 +441,9 @@ export interface ChatResponse {
   conversation_title: string;
   generator: string;
   note: string;
+  error: string;
   sources: Source[];
+  citations?: CitationInfo;
   message: {
     id: number;
     role: string;
@@ -456,4 +521,219 @@ export interface SavedQuestion {
   explanation: string;
   source: Record<string, unknown>;
   created_at: string;
+}
+
+export interface AuthUser {
+  id: number;
+  email: string;
+  name: string;
+  is_local: boolean;
+  created_at: string | null;
+}
+
+export interface AuthStatus {
+  auth_required: boolean;
+  registration_allowed: boolean;
+  smtp_configured: boolean;
+  env_keys_only: boolean;
+  provider_keys: Record<string, boolean>;
+  user: AuthUser | null;
+}
+
+export interface ProviderPreset {
+  id: string;
+  label: string;
+  base_url: string;
+  model: string;
+  requires_key: boolean;
+  note: string;
+  env_key_set: boolean;
+  selected: boolean;
+}
+
+export interface ProviderList {
+  providers: ProviderPreset[];
+  current: string;
+  key_source: string;
+}
+
+export interface ModelList {
+  provider: string;
+  models: string[];
+  message: string;
+}
+
+export interface AIUsageLog {
+  id: number;
+  provider: string;
+  model: string;
+  operation: string;
+  status: string;
+  input_chars: number;
+  output_chars: number;
+  latency_ms: number;
+  error: string;
+  created_at: string;
+}
+
+export interface AIUsageResponse {
+  summary: { requests: number; errors: number };
+  logs: AIUsageLog[];
+}
+
+export interface EvaluationResult {
+  generator: string;
+  score: number;
+  verdict: string;
+  strengths: string[];
+  gaps: string[];
+  corrected_answer: string;
+  next_step: string;
+  sources: Source[];
+  mastery_recorded: boolean;
+  note?: string;
+}
+
+export interface LibrarySemester {
+  semester: string;
+  subjects: number;
+  modules: number;
+  topics: number;
+  completed_topics: number;
+  mastered: number;
+  documents: number;
+  credits: number;
+  progress: number;
+}
+
+export interface LibrarySubject extends Subject {
+  module_count: number;
+  topic_count: number;
+  completed_topics: number;
+  mastered_count: number;
+  in_progress_count: number;
+  outcome_count: number;
+  document_count: number;
+  progress: number;
+}
+
+export interface LibraryBatchFile {
+  relative_path: string;
+  source_path: string;
+  filename: string;
+  size_bytes: number;
+  sha256: string;
+  status: "imported" | "duplicate" | "unsupported" | "skipped" | "failed";
+  document_id: number | null;
+  subject_id: number | null;
+  course_code: string;
+  course_title: string;
+  semester: string;
+  academic_year: string;
+  pages: number;
+  modules: number;
+  topics: number;
+  course_outcomes: number;
+  warnings: string[];
+  message: string;
+}
+
+export interface LibraryBatch {
+  id: number;
+  source_root: string;
+  status: string;
+  total_files: number;
+  imported_files: number;
+  duplicate_files: number;
+  unsupported_files: number;
+  skipped_files: number;
+  failed_files: number;
+  error: string;
+  manifest: LibraryBatchFile[];
+  created_at: string | null;
+  completed_at: string | null;
+}
+
+export interface LibraryOverview {
+  semesters: LibrarySemester[];
+  subjects: LibrarySubject[];
+  totals: {
+    subjects: number;
+    semesters: number;
+    modules: number;
+    topics: number;
+    documents: number;
+    indexed_documents: number;
+    import_batches: number;
+  };
+  recent_batches: LibraryBatch[];
+  note: string;
+}
+
+export interface SyllabusModuleRecord {
+  id: number;
+  subject_id: number;
+  document_id: number | null;
+  number: number;
+  label: string;
+  title: string;
+  description: string;
+  lecture_hours: number;
+  tutorial_hours: number;
+  practical_hours: number;
+  self_study_hours: number;
+  page_start: number;
+  page_end: number;
+  topic_count: number;
+  mastered: number;
+  learned: number;
+  in_progress: number;
+  topic_ids: number[];
+}
+
+export interface CourseOutcome {
+  id: number;
+  subject_id: number;
+  document_id: number | null;
+  code: string;
+  description: string;
+  bloom_level: string;
+  po_mapping: (number | null)[];
+  page: number;
+}
+
+export interface LibrarySubjectDetail {
+  subject: Subject;
+  modules: SyllabusModuleRecord[];
+  course_outcomes: CourseOutcome[];
+  topics: Topic[];
+  documents: DocumentRecord[];
+  progress: {
+    topics: number;
+    modules: number;
+    mastered: number;
+    learned: number;
+    in_progress: number;
+    not_started: number;
+    completion: number;
+  };
+  note: string;
+}
+
+export interface LibrarySearchResult {
+  kind: "subject" | "module" | "topic";
+  subject_id: number;
+  subject: string;
+  course_code: string;
+  semester: string;
+  title: string;
+  module: string;
+  page: number | null;
+  document: string;
+  document_id: number | null;
+}
+
+export interface LibrarySearch {
+  results: LibrarySearchResult[];
+  note: string;
 }

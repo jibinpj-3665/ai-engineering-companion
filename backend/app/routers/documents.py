@@ -4,15 +4,16 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ..ai.rag import retrieve
 from ..config import ALLOWED_DOCUMENT_EXTENSIONS, MAX_UPLOAD_MB, UPLOAD_DIR
-from ..database import get_db
+from ..database import current_user_id, get_db
 from ..models import Document, Subject
 from ..serializers import document_dict
-from ..services.documents import guess_kind, process_document_task
+from ..services.documents import guess_kind, ocr_available, process_document_task, validate_upload
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 
@@ -46,29 +47,59 @@ async def upload_document(
         raise HTTPException(status_code=400, detail=f"Unsupported file type {suffix}. Allowed: {', '.join(sorted(ALLOWED_DOCUMENT_EXTENSIONS))}")
     if subject_id is not None and not db.get(Subject, subject_id):
         raise HTTPException(status_code=404, detail="Subject not found")
-    data = await file.read()
-    if len(data) > MAX_UPLOAD_MB * 1024 * 1024:
-        raise HTTPException(status_code=413, detail=f"File exceeds the {MAX_UPLOAD_MB} MB limit.")
-    if not data:
-        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
-    stored_name = f"{uuid.uuid4().hex}{suffix}"
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    stored_name = f"{uuid.uuid4().hex}{suffix}"
     stored_path = UPLOAD_DIR / stored_name
-    stored_path.write_bytes(data)
+    size = 0
+    limit = MAX_UPLOAD_MB * 1024 * 1024
+    try:
+        with stored_path.open("wb") as handle:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > limit:
+                    raise HTTPException(status_code=413, detail=f"File exceeds the {MAX_UPLOAD_MB} MB limit.")
+                handle.write(chunk)
+        if size == 0:
+            raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+        validate_upload(stored_path, suffix)
+    except HTTPException:
+        stored_path.unlink(missing_ok=True)
+        raise
+    except RuntimeError as exc:
+        stored_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception:
+        stored_path.unlink(missing_ok=True)
+        raise
     document = Document(
         subject_id=subject_id,
         filename=filename,
         stored_path=str(stored_path),
         mime_type=file.content_type or "application/octet-stream",
-        size_bytes=len(data),
+        size_bytes=size,
         status="queued",
+        stage="Queued for extraction",
+        progress=5,
         doc_kind=doc_kind or guess_kind(filename),
     )
     db.add(document)
     db.commit()
     db.refresh(document)
-    background.add_task(process_document_task, document.id)
-    return document_dict(document)
+    background.add_task(process_document_task, document.id, current_user_id.get())
+    return {**document_dict(document), "ocr_available": ocr_available()}
+
+
+@router.get("/capabilities")
+def capabilities():
+    return {
+        "ocr_available": ocr_available(),
+        "max_upload_mb": MAX_UPLOAD_MB,
+        "allowed_extensions": sorted(ALLOWED_DOCUMENT_EXTENSIONS),
+        "note": "Scanned PDFs and images need the Tesseract OCR engine on the server." if not ocr_available() else "",
+    }
 
 
 @router.get("/{document_id}")
@@ -105,17 +136,30 @@ def delete_document(document_id: int, db: Session = Depends(get_db)):
     return {"ok": True}
 
 
+@router.get("/{document_id}/download")
+def download_document(document_id: int, db: Session = Depends(get_db)):
+    document = db.get(Document, document_id)
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+    path = Path(document.stored_path)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Stored file is missing.")
+    return FileResponse(path, filename=document.filename, media_type=document.mime_type or "application/octet-stream")
+
+
 @router.post("/{document_id}/reprocess")
 def reprocess_document(document_id: int, background: BackgroundTasks, db: Session = Depends(get_db)):
     document = db.get(Document, document_id)
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
-    if document.status == "processing":
+    if document.status in {"processing", "extracting", "indexing"}:
         raise HTTPException(status_code=409, detail="Document is already being processed.")
     document.status = "queued"
+    document.stage = "Queued for reprocessing"
+    document.progress = 5
     document.error = ""
     db.commit()
-    background.add_task(process_document_task, document.id)
+    background.add_task(process_document_task, document.id, current_user_id.get())
     return document_dict(document)
 
 

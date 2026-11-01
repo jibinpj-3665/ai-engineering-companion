@@ -11,6 +11,8 @@ from .providers import EMBED_DIM, embed_texts_sync, local_embedding
 
 _WORD_RE = re.compile(r"[a-zA-Z0-9]+")
 _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+")
+_CITATION_GROUP_RE = re.compile(r"\[([^\]]*\bS\d+\b[^\]]*)\]", re.IGNORECASE)
+_CITATION_LABEL_RE = re.compile(r"\bS(\d+)(?:\s*[-\u2013\u2014]\s*S?(\d+))?", re.IGNORECASE)
 
 
 def split_text(text: str, max_chars: int = 1000, overlap: int = 120) -> List[str]:
@@ -78,7 +80,7 @@ def retrieve(db: Session, query: str, subject_id: Optional[int] = None, top_k: i
     remote_qvec = None
     cfg = get_ai_config(db)
     if cfg.get("embedding_provider") not in {None, "", "local"} and cfg.get("configured"):
-        vectors, _provider = embed_texts_sync(db, [query])
+        vectors, _provider = embed_texts_sync(db, [query], task_type="RETRIEVAL_QUERY")
         if vectors:
             remote_qvec = vectors[0]
 
@@ -88,7 +90,7 @@ def retrieve(db: Session, query: str, subject_id: Optional[int] = None, top_k: i
         rows_query = rows_query.filter(DocumentChunk.subject_id == subject_id)
     if document_id:
         rows_query = rows_query.filter(DocumentChunk.document_id == document_id)
-    rows = rows_query.filter(Document.status == "ready").limit(6000).all()
+    rows = rows_query.filter(Document.status == "ready", Document.active == True).limit(6000).all()  # noqa: E712
 
     scored = []
     for chunk, document in rows:
@@ -118,6 +120,7 @@ def retrieve(db: Session, query: str, subject_id: Optional[int] = None, top_k: i
             snippet = snippet[:700].rsplit(" ", 1)[0] + "..."
         source = {
             "index": index,
+            "label": f"S{index}",
             "document_id": document.id,
             "document": document.filename,
             "page": chunk.page,
@@ -136,6 +139,38 @@ def retrieve(db: Session, query: str, subject_id: Optional[int] = None, top_k: i
         "context": "\n\n".join(context_parts),
         "mode": "local",
         "note": "" if sources else "No indexed study material matched this query.",
+    }
+
+
+def _cited_indexes(answer: str) -> set[int]:
+    cited: set[int] = set()
+    for group in _CITATION_GROUP_RE.findall(answer or ""):
+        for start_raw, end_raw in _CITATION_LABEL_RE.findall(group):
+            start = int(start_raw)
+            end = int(end_raw) if end_raw else start
+            if end < start:
+                start, end = end, start
+            if end - start > 50:
+                cited.add(start)
+                cited.add(end)
+                continue
+            cited.update(range(start, end + 1))
+    return cited
+
+
+def annotate_citations(answer: str, sources: List[dict]) -> tuple[List[dict], dict]:
+    cited = _cited_indexes(answer)
+    valid = {int(source.get("index", 0)) for source in sources}
+    known = sorted(cited & valid)
+    unknown = sorted(cited - valid)
+    annotated = [
+        {**source, "cited": int(source.get("index", 0)) in cited}
+        for source in sources
+    ]
+    return annotated, {
+        "labels": [f"S{index}" for index in known],
+        "unknown_labels": [f"S{index}" for index in unknown],
+        "uncited": bool(sources) and not known,
     }
 
 

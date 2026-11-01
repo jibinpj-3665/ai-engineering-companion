@@ -1,0 +1,75 @@
+name: ai-engineering-companion
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: aec
+      POSTGRES_USER: aec
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - aec-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aec -d aec"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    security_opt:
+      - no-new-privileges:true
+
+  app:
+    build:
+      context: .
+    image: ai-engineering-companion:latest
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${AEC_HTTP_PORT:-8080}:8765"
+    environment:
+      AEC_HOST: 0.0.0.0
+      AEC_PORT: 8765
+      AEC_DATABASE_URL: postgresql+psycopg://aec:${POSTGRES_PASSWORD}@db:5432/aec
+      AEC_REQUIRE_AUTH: "1"
+      AEC_ALLOW_REGISTRATION: ${AEC_ALLOW_REGISTRATION:-auto}
+      AEC_ENV_KEYS_ONLY: ${AEC_ENV_KEYS_ONLY:-1}
+      AEC_SESSION_DAYS: ${AEC_SESSION_DAYS:-30}
+      AEC_PUBLIC_URL: ${AEC_PUBLIC_URL:-}
+      AEC_COOKIE_SECURE: ${AEC_COOKIE_SECURE:-auto}
+      AEC_CORS_ORIGINS: ${AEC_CORS_ORIGINS:-}
+      AEC_OPENAI_API_KEY: ${AEC_OPENAI_API_KEY:-}
+      AEC_OPENAI_BASE_URL: ${AEC_OPENAI_BASE_URL:-}
+      AEC_OPENAI_MODEL: ${AEC_OPENAI_MODEL:-}
+      AEC_GEMINI_API_KEY: ${AEC_GEMINI_API_KEY:-}
+      AEC_GEMINI_BASE_URL: ${AEC_GEMINI_BASE_URL:-}
+      AEC_GEMINI_MODEL: ${AEC_GEMINI_MODEL:-}
+      AEC_GROQ_API_KEY: ${AEC_GROQ_API_KEY:-}
+      AEC_GROQ_BASE_URL: ${AEC_GROQ_BASE_URL:-}
+      AEC_GROQ_MODEL: ${AEC_GROQ_MODEL:-}
+      AEC_CUSTOM_API_KEY: ${AEC_CUSTOM_API_KEY:-}
+      AEC_CUSTOM_BASE_URL: ${AEC_CUSTOM_BASE_URL:-}
+      AEC_CUSTOM_MODEL: ${AEC_CUSTOM_MODEL:-}
+      AEC_LOCAL_API_KEY: ${AEC_LOCAL_API_KEY:-}
+      AEC_LOCAL_BASE_URL: ${AEC_LOCAL_BASE_URL:-}
+      AEC_LOCAL_MODEL: ${AEC_LOCAL_MODEL:-}
+      AEC_SMTP_HOST: ${AEC_SMTP_HOST:-}
+      AEC_SMTP_PORT: ${AEC_SMTP_PORT:-587}
+      AEC_SMTP_USER: ${AEC_SMTP_USER:-}
+      AEC_SMTP_PASSWORD: ${AEC_SMTP_PASSWORD:-}
+      AEC_SMTP_FROM: ${AEC_SMTP_FROM:-noreply@localhost}
+      AEC_SMTP_TLS: ${AEC_SMTP_TLS:-1}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - aec-data:/data
+    restart: unless-stopped
+    stop_grace_period: 15s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+volumes:
+  aec-data:
+  aec-postgres:

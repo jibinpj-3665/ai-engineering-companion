@@ -68,3 +68,47 @@ jobs:
 
       - name: Build frontend
         run: npm run build:frontend
+
+  postgres:
+    name: PostgreSQL integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: aec_test
+          POSTGRES_USER: aec
+          POSTGRES_PASSWORD: aec
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U aec -d aec_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      AEC_DATABASE_URL: postgresql+psycopg://aec:aec@localhost:5432/aec_test
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: "utf-8"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install backend dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r backend/requirements.txt
+
+      - name: Run backend tests on PostgreSQL
+        run: python -m pytest backend -q

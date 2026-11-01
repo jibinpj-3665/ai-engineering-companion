@@ -43,14 +43,14 @@ npm run test:frontend
 npm run build:frontend
 ```
 
-Backend tests use temporary data directories and must not touch `%LOCALAPPDATA%`. Frontend tests use Vitest and Testing Library.
+Backend tests use temporary data directories and must not touch `%LOCALAPPDATA%`. The CI PostgreSQL job runs the same backend suite against PostgreSQL 16. Frontend tests use Vitest and Testing Library.
 
 ## Guidelines
 
 - Keep the offline path functional. Any AI-powered feature needs a deterministic, clearly labelled fallback.
 - Never fabricate citations. Retrieval results must reference real uploaded pages.
 - Do not mark topics complete based on viewing content alone; mastery requires a passed assessment.
-- Keep secrets out of source. API keys belong in the encrypted settings store, never in commits or logs.
+- Keep secrets out of source. API keys belong in the encrypted settings store or server environment, never in commits, logs, or frontend code.
 - Follow the existing Windows-first packaging flow: React build → PyInstaller backend → electron-builder.
 - Match the existing code style: TypeScript strict, functional React components, small typed API helpers, Tailwind tokens instead of raw colours.
 - Update tests and documentation with behaviour changes.

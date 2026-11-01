@@ -3,10 +3,13 @@ import { Link, Route, Routes } from "react-router-dom";
 import { AlertTriangle, Compass } from "lucide-react";
 import { AppShell } from "./components/layout/AppShell";
 import { Button } from "./components/ui/Button";
+import { PageLoader } from "./components/ui/Spinner";
+import { useApp } from "./contexts/AppContext";
 import Dashboard from "./pages/Dashboard";
 import Subjects from "./pages/Subjects";
 import Documents from "./pages/Documents";
 import Syllabus from "./pages/Syllabus";
+import SyllabusLibrary from "./pages/SyllabusLibrary";
 import Tutor from "./pages/Tutor";
 import Learn from "./pages/Learn";
 import Practice from "./pages/Practice";
@@ -17,6 +20,8 @@ import Labs from "./pages/Labs";
 import LabDetail from "./pages/LabDetail";
 import Visuals from "./pages/Visuals";
 import Settings from "./pages/Settings";
+import { AuthPage } from "./pages/AuthPage";
+import ResetPasswordPage from "./pages/ResetPasswordPage";
 
 class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
   state = { error: null as Error | null };
@@ -62,15 +67,24 @@ function NotFound() {
   );
 }
 
+function AuthGate({ children }: { children: ReactNode }) {
+  const { loading, authRequired, user } = useApp();
+  if (loading) return <PageLoader label="Securing your workspace" />;
+  if (authRequired && !user) return <AuthPage />;
+  return <>{children}</>;
+}
+
 export default function App() {
   return (
     <ErrorBoundary>
       <Routes>
-        <Route element={<AppShell />}>
+        <Route path="reset-password" element={<ResetPasswordPage />} />
+        <Route element={<AuthGate><AppShell /></AuthGate>}>
           <Route index element={<Dashboard />} />
           <Route path="subjects" element={<Subjects />} />
           <Route path="documents" element={<Documents />} />
           <Route path="syllabus" element={<Syllabus />} />
+          <Route path="syllabus-library" element={<SyllabusLibrary />} />
           <Route path="tutor" element={<Tutor />} />
           <Route path="learn" element={<Learn />} />
           <Route path="learn/:topicId" element={<Learn />} />

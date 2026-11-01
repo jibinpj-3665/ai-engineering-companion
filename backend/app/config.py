@@ -4,9 +4,60 @@ from pathlib import Path
 
 APP_NAME = "AI Engineering Companion"
 APP_SLUG = "ai-engineering-companion"
-VERSION = "1.0.0"
-HOST = "127.0.0.1"
+VERSION = "1.3.0"
+HOST = os.environ.get("AEC_HOST", "127.0.0.1")
 PORT = int(os.environ.get("AEC_PORT", "8765"))
+CORS_ORIGINS = [
+    origin.strip()
+    for origin in os.environ.get(
+        "AEC_CORS_ORIGINS",
+        "http://localhost:5173,http://127.0.0.1:5173",
+    ).split(",")
+    if origin.strip()
+]
+WEB_USER = os.environ.get("AEC_WEB_USER", "student")
+WEB_PASSWORD = os.environ.get("AEC_WEB_PASSWORD", "")
+PUBLIC_URL = os.environ.get("AEC_PUBLIC_URL", "").rstrip("/")
+SESSION_COOKIE = "aec_session"
+SESSION_DAYS = int(os.environ.get("AEC_SESSION_DAYS", "30"))
+COOKIE_SECURE = os.environ.get("AEC_COOKIE_SECURE", "auto").lower()
+ENV_KEYS_ONLY = os.environ.get("AEC_ENV_KEYS_ONLY", "").lower() in {"1", "true", "yes", "on"}
+SMTP_HOST = os.environ.get("AEC_SMTP_HOST", "")
+SMTP_PORT = int(os.environ.get("AEC_SMTP_PORT", "587"))
+SMTP_USER = os.environ.get("AEC_SMTP_USER", "")
+SMTP_PASSWORD = os.environ.get("AEC_SMTP_PASSWORD", "")
+SMTP_FROM = os.environ.get("AEC_SMTP_FROM", SMTP_USER or "noreply@localhost")
+SMTP_TLS = os.environ.get("AEC_SMTP_TLS", "1").lower() not in {"0", "false", "no"}
+
+ENV_AI_KEYS = {
+    "openai": os.environ.get("AEC_OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY", ""),
+    "gemini": os.environ.get("AEC_GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY", ""),
+    "groq": os.environ.get("AEC_GROQ_API_KEY") or os.environ.get("GROQ_API_KEY", ""),
+    "custom": os.environ.get("AEC_CUSTOM_API_KEY", ""),
+    "local": os.environ.get("AEC_LOCAL_API_KEY", ""),
+}
+ENV_AI_BASE_URLS = {
+    "openai": os.environ.get("AEC_OPENAI_BASE_URL", ""),
+    "gemini": os.environ.get("AEC_GEMINI_BASE_URL", ""),
+    "groq": os.environ.get("AEC_GROQ_BASE_URL", ""),
+    "custom": os.environ.get("AEC_CUSTOM_BASE_URL", ""),
+    "local": os.environ.get("AEC_LOCAL_BASE_URL", ""),
+}
+ENV_AI_MODELS = {
+    "openai": os.environ.get("AEC_OPENAI_MODEL", ""),
+    "gemini": os.environ.get("AEC_GEMINI_MODEL", ""),
+    "groq": os.environ.get("AEC_GROQ_MODEL", ""),
+    "custom": os.environ.get("AEC_CUSTOM_MODEL", ""),
+    "local": os.environ.get("AEC_LOCAL_MODEL", ""),
+}
+
+
+def auth_required() -> bool:
+    return os.environ.get("AEC_REQUIRE_AUTH", "0").lower() in {"1", "true", "yes", "on"}
+
+
+def registration_mode() -> str:
+    return os.environ.get("AEC_ALLOW_REGISTRATION", "auto").lower()
 
 
 def _default_data_dir() -> Path:
@@ -22,7 +73,20 @@ UPLOAD_DIR = DATA_DIR / "uploads"
 BACKUP_DIR = DATA_DIR / "backups"
 LOG_DIR = DATA_DIR / "logs"
 DATABASE_PATH = DATA_DIR / "aec.db"
-DATABASE_URL = f"sqlite:///{DATABASE_PATH.as_posix()}"
+
+
+def _database_url() -> str:
+    configured = os.environ.get("AEC_DATABASE_URL", "").strip()
+    if not configured:
+        return f"sqlite:///{DATABASE_PATH.as_posix()}"
+    if configured.startswith("postgres://"):
+        configured = configured.replace("postgres://", "postgresql+psycopg://", 1)
+    elif configured.startswith("postgresql://"):
+        configured = configured.replace("postgresql://", "postgresql+psycopg://", 1)
+    return configured
+
+
+DATABASE_URL = _database_url()
 SECRET_KEY_PATH = DATA_DIR / "secret.key"
 
 if getattr(sys, "frozen", False):
@@ -42,7 +106,7 @@ DEFAULT_SETTINGS = {
     "ai_model": "gpt-4o-mini",
     "ai_embedding_model": "text-embedding-3-small",
     "ai_temperature": "0.4",
-    "ai_max_tokens": "1400",
+    "ai_max_tokens": "4096",
     "embedding_provider": "local",
     "local_base_url": "http://127.0.0.1:11434/v1",
     "local_model": "llama3.1",

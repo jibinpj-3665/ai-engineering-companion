@@ -1,4 +1,5 @@
 import logging
+import threading
 from contextlib import asynccontextmanager
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -8,9 +9,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from .config import APP_NAME, LOG_DIR, STATIC_DIR, VERSION, ensure_directories
+from .config import APP_NAME, CORS_ORIGINS, HOST, LOG_DIR, STATIC_DIR, VERSION, WEB_PASSWORD, auth_required, ensure_directories
 from .database import init_db
-from .routers import ai, analytics, documents, labs, planner, quizzes, revision, settings, subjects, syllabus, teaching
+from .routers import ai, analytics, auth, documents, labs, planner, quizzes, revision, settings, subjects, syllabus, syllabus_library, teaching
+from .web_middleware import AuthMiddleware, SecurityHeadersMiddleware
 
 ensure_directories()
 logger = logging.getLogger("aec")
@@ -24,7 +26,27 @@ if not logger.handlers:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
-    logger.info("Backend started")
+    logger.info("Backend started on %s", HOST)
+
+    def _recover_documents():
+        from .services.documents import recover_pending_documents
+
+        try:
+            count = recover_pending_documents()
+            if count:
+                logger.info("Recovered %s pending document processing job(s)", count)
+        except Exception:
+            logger.exception("Document recovery failed")
+
+    threading.Thread(target=_recover_documents, name="aec-document-recovery", daemon=True).start()
+    if auth_required():
+        logger.info("Account authentication is required for API access")
+    elif HOST not in {"127.0.0.1", "localhost", "::1"} and not WEB_PASSWORD:
+        logger.warning(
+            "Backend is listening on %s without accounts or AEC_WEB_PASSWORD. "
+            "Set AEC_REQUIRE_AUTH=1 and use HTTPS before exposing it beyond a trusted network.",
+            HOST,
+        )
     yield
     logger.info("Backend stopped")
 
@@ -33,16 +55,20 @@ app = FastAPI(title=APP_NAME, version=VERSION, lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
-    allow_credentials=False,
+    allow_origins=CORS_ORIGINS,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(AuthMiddleware)
+app.add_middleware(SecurityHeadersMiddleware)
 
 api_routers = [
+    auth.router,
     subjects.router,
     documents.router,
     syllabus.router,
+    syllabus_library.router,
     ai.router,
     teaching.router,
     quizzes.router,
@@ -63,6 +89,7 @@ def health():
         "app": APP_NAME,
         "version": VERSION,
         "mode": "desktop" if STATIC_DIR.exists() else "api",
+        "auth_required": auth_required(),
     }
 
 
@@ -81,12 +108,18 @@ def spa(full_path: str):
     if full_path.startswith("api"):
         return JSONResponse(status_code=404, content={"detail": "Not found"})
     if STATIC_DIR.exists():
+        root = STATIC_DIR.resolve()
         candidate = (STATIC_DIR / full_path).resolve()
-        if full_path and candidate.is_file() and str(candidate).startswith(str(STATIC_DIR.resolve())):
-            return FileResponse(candidate)
+        if full_path and candidate.is_file() and candidate.is_relative_to(root):
+            response = FileResponse(candidate)
+            if candidate.name == "sw.js" or candidate.name.startswith("workbox-"):
+                response.headers["Cache-Control"] = "no-cache"
+            return response
         index = STATIC_DIR / "index.html"
         if index.exists():
-            return FileResponse(index)
+            response = FileResponse(index)
+            response.headers["Cache-Control"] = "no-cache"
+            return response
     return JSONResponse({
         "app": APP_NAME,
         "version": VERSION,

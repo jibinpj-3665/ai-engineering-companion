@@ -9,6 +9,31 @@ const DEV_SERVER = process.env.AEC_DEV_SERVER || "";
 const isDev = Boolean(DEV_SERVER);
 const APP_ID = "com.jibinpj.aiengineeringcompanion";
 
+function remoteServer() {
+  const raw = (process.env.AEC_REMOTE_URL || "").trim();
+  if (!raw) return "";
+  const parsed = new URL(raw);
+  if (!["http:", "https:"].includes(parsed.protocol)) {
+    throw new Error("AEC_REMOTE_URL must be an http(s) URL.");
+  }
+  if (parsed.username || parsed.password) {
+    throw new Error("AEC_REMOTE_URL must not contain credentials.");
+  }
+  const local = ["localhost", "127.0.0.1", "::1"].includes(parsed.hostname);
+  if (parsed.protocol !== "https:" && !local) {
+    throw new Error("AEC_REMOTE_URL must use HTTPS for a remote server.");
+  }
+  return parsed.toString().replace(/\/$/, "");
+}
+
+let REMOTE_URL = "";
+let remoteError = "";
+try {
+  REMOTE_URL = remoteServer();
+} catch (error) {
+  remoteError = error instanceof Error ? error.message : String(error);
+}
+
 let mainWindow = null;
 let splashWindow = null;
 let backendProcess = null;
@@ -115,6 +140,10 @@ async function waitForBackend(port, timeoutMs = 90000) {
 }
 
 async function ensureBackend() {
+  if (REMOTE_URL) {
+    logLine(`Remote server mode: ${new URL(REMOTE_URL).origin} (no local backend started)`);
+    return REMOTE_URL;
+  }
   if (isDev) {
     backendPort = 8765;
     await waitForBackend(backendPort, 30000);
@@ -193,7 +222,7 @@ function createMainWindow(url) {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false,
+      sandbox: true,
       spellcheck: true,
     },
   });
@@ -209,7 +238,12 @@ function createMainWindow(url) {
   });
 
   mainWindow.webContents.on("will-navigate", (event, target) => {
-    const allowed = target.startsWith(url) || (isDev && target.startsWith(DEV_SERVER));
+    let allowed = false;
+    try {
+      allowed = new URL(target).origin === new URL(url).origin;
+    } catch {
+      allowed = false;
+    }
     if (!allowed) {
       event.preventDefault();
       try {
@@ -254,7 +288,16 @@ function registerIpc() {
     electron: process.versions.electron,
     chrome: process.versions.chrome,
     packaged: app.isPackaged,
+    remote: Boolean(REMOTE_URL),
   }));
+  ipcMain.handle("aec:pick-folder", async () => {
+    const result = await dialog.showOpenDialog(mainWindow || undefined, {
+      title: "Choose a syllabus folder",
+      properties: ["openDirectory"],
+    });
+    if (result.canceled || !result.filePaths.length) return null;
+    return result.filePaths[0];
+  });
   ipcMain.handle("aec:open-data", async () => {
     const dir = dataDirectory();
     fs.mkdirSync(dir, { recursive: true });
@@ -281,6 +324,11 @@ app.whenReady().then(async () => {
   registerIpc();
   if (!isDev) Menu.setApplicationMenu(null);
   createSplash();
+
+  if (remoteError) {
+    showStartupError(remoteError);
+    return;
+  }
 
   try {
     const baseUrl = await ensureBackend();

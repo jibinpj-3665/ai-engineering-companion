@@ -4,11 +4,13 @@ const path = require("path");
 
 const url = process.env.AEC_SCREENSHOT_URL || "http://127.0.0.1:8765";
 const output = process.env.AEC_SCREENSHOT_OUT || path.join(__dirname, "..", "docs", "dashboard.png");
+const width = Number(process.env.AEC_SCREENSHOT_WIDTH || 1440);
+const height = Number(process.env.AEC_SCREENSHOT_HEIGHT || 920);
 
 app.whenReady().then(async () => {
   const window = new BrowserWindow({
-    width: 1440,
-    height: 920,
+    width,
+    height,
     show: false,
     backgroundColor: "#070a16",
     webPreferences: { offscreen: false, backgroundThrottling: false },

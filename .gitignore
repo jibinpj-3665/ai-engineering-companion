@@ -13,22 +13,38 @@ __pycache__/
 
 # Build output
 frontend/dist/
+frontend/dev-dist/
 dist-backend/
 release/
 build/
 backend/build/
 backend/dist/
 backend/*.spec
+*.tsbuildinfo
+
+# Test and coverage output
+.coverage
+coverage/
+htmlcov/
 
 # Runtime data and secrets
 backend/data/
 backend/uploads/
+backend/backups/
 *.db
+*.db-journal
 *.db-wal
 *.db-shm
+*.sqlite
+*.sqlite3
 secret.key
 .env
-.env.local
+.env.*
+!.env.example
+*.pem
+*.p12
+*.pfx
+*.jks
 logs/
 backups/
 

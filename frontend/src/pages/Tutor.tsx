@@ -7,6 +7,7 @@ import {
   Bot,
   Brain,
   ChevronDown,
+  ClipboardCheck,
   Headphones,
   Loader2,
   MessageSquarePlus,
@@ -26,8 +27,8 @@ import { useToast } from "../components/ui/Toast";
 import { Button } from "../components/ui/Button";
 import { Select } from "../components/ui/Input";
 import { Markdown } from "../components/ui/Markdown";
-import { EmptyState } from "../components/ui/EmptyState";
 import { Spinner } from "../components/ui/Spinner";
+import { EvaluateDialog } from "../components/EvaluateDialog";
 import { cn, timeAgo } from "../lib/utils";
 
 interface UiMessage {
@@ -36,7 +37,22 @@ interface UiMessage {
   content: string;
   sources: Source[];
   created_at: string;
+  note?: string;
+  generator?: string;
+  streaming?: boolean;
 }
+
+const teachingModes = [
+  { id: "chat", label: "Ask", hint: "Direct answer" },
+  { id: "explain", label: "Explain", hint: "Structured lesson" },
+  { id: "socratic", label: "Socratic", hint: "Guiding questions" },
+  { id: "derive", label: "Derive", hint: "First principles" },
+  { id: "example", label: "Worked example", hint: "Solved problem" },
+  { id: "simplify", label: "Simplify", hint: "Beginner analogy" },
+  { id: "quiz", label: "Quiz me", hint: "One question" },
+  { id: "debug", label: "Debug coach", hint: "Hint at a time" },
+  { id: "evaluate", label: "Examiner", hint: "Evaluate my answer" },
+];
 
 const personalities = [
   { id: "study_buddy", label: "Friendly Study Buddy" },
@@ -74,13 +90,17 @@ export default function Tutor() {
   const [topicId, setTopicId] = useState<number | "">("");
   const [personality, setPersonality] = useState(settings?.personality || "study_buddy");
   const [input, setInput] = useState("");
+  const [mode, setMode] = useState("chat");
   const [sending, setSending] = useState(false);
+  const [evaluateOpen, setEvaluateOpen] = useState(false);
+  const [lastQuestion, setLastQuestion] = useState("");
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [listening, setListening] = useState(false);
   const [speakingId, setSpeakingId] = useState<number | null>(null);
   const [conversationOpen, setConversationOpen] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const recognitionRef = useRef<{ start: () => void; stop: () => void; abort: () => void } | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
   const askedRef = useRef(false);
 
   useEffect(() => {
@@ -124,42 +144,84 @@ export default function Tutor() {
     }
   };
 
-  const sendMessage = useCallback(async (text: string) => {
+  const patchAssistant = useCallback((id: number, patch: Partial<UiMessage>) => {
+    setMessages((current) => current.map((item) => (item.id === id ? { ...item, ...patch } : item)));
+  }, []);
+
+  const sendMessage = useCallback(async (text: string, requestedMode?: string) => {
     const message = text.trim();
     if (!message || sending) return;
+    const selectedMode = requestedMode || mode;
     setInput("");
+    setLastQuestion(message);
     setSending(true);
-    const temporary: UiMessage = { id: Date.now(), role: "user", content: message, sources: [], created_at: new Date().toISOString() };
-    setMessages((current) => [...current, temporary]);
+    const userTempId = Date.now();
+    const assistantId = userTempId + 1;
+    const temporary: UiMessage = { id: userTempId, role: "user", content: message, sources: [], created_at: new Date().toISOString() };
+    const assistant: UiMessage = {
+      id: assistantId,
+      role: "assistant",
+      content: "",
+      sources: [],
+      created_at: new Date().toISOString(),
+      generator: aiStatus?.configured ? "ai" : "offline",
+      streaming: true,
+    };
+    setMessages((current) => [...current, temporary, assistant]);
+    const controller = new AbortController();
+    abortRef.current = controller;
     try {
-      const response = await api.chat({
-        message,
-        conversation_id: activeId || undefined,
-        subject_id: subjectId === "" ? undefined : Number(subjectId),
-        topic_id: topicId === "" ? undefined : Number(topicId),
-        personality,
-        mode: "chat",
-      });
-      setActiveId(response.conversation_id);
-      setMessages((current) => [
-        ...current,
+      await api.chatStream(
         {
-          id: response.message.id,
-          role: "assistant",
-          content: response.message.content,
-          sources: response.sources || [],
-          created_at: response.message.created_at,
+          message,
+          conversation_id: activeId || undefined,
+          subject_id: subjectId === "" ? undefined : Number(subjectId),
+          topic_id: topicId === "" ? undefined : Number(topicId),
+          personality,
+          mode: selectedMode,
         },
-      ]);
-      if (response.note) toast("Tutor notice", response.note, response.generator === "ai" ? "info" : "warning");
+        {
+          onMeta: (meta) => {
+            setActiveId(meta.conversation_id);
+            patchAssistant(assistantId, { sources: meta.sources || [], generator: meta.generator });
+          },
+          onDelta: (delta) => {
+            setMessages((current) => current.map((item) => item.id === assistantId ? { ...item, content: item.content + delta } : item));
+          },
+          onError: (detail) => {
+            patchAssistant(assistantId, { note: `AI provider error: ${detail} Showing a labelled offline retrieval answer.`, generator: "offline" });
+          },
+          onDone: (done) => {
+            setMessages((current) => current.map((item) => item.id === assistantId ? {
+              ...item,
+              id: done.message_id,
+              sources: done.sources || item.sources,
+              note: item.note || done.note || "",
+              generator: done.generator,
+              streaming: false,
+            } : item));
+            if (done.note) toast("Tutor notice", done.note, done.generator === "ai" ? "info" : "warning");
+          },
+        },
+        controller.signal,
+      );
       await loadConversations();
     } catch (error) {
-      setMessages((current) => current.filter((item) => item.id !== temporary.id));
-      toast("Could not send message", error instanceof ApiError ? error.message : "Unexpected error", "error");
+      if (controller.signal.aborted) {
+        patchAssistant(assistantId, { streaming: false, note: "Stopped before the answer was saved. Ask again to save a complete answer." });
+      } else {
+        setMessages((current) => current.filter((item) => item.id !== userTempId && item.id !== assistantId));
+        toast("Could not send message", error instanceof ApiError ? error.message : "Unexpected error", "error");
+      }
     } finally {
+      abortRef.current = null;
       setSending(false);
     }
-  }, [activeId, loadConversations, personality, sending, subjectId, toast, topicId]);
+  }, [activeId, aiStatus?.configured, loadConversations, mode, patchAssistant, personality, sending, subjectId, toast, topicId]);
+
+  const stopStreaming = () => {
+    abortRef.current?.abort();
+  };
 
   useEffect(() => {
     const ask = params.get("ask");
@@ -313,6 +375,27 @@ export default function Tutor() {
           </div>
         </div>
 
+        <div className="flex items-center gap-1.5 overflow-x-auto border-b border-border/60 px-3 py-2">
+          {teachingModes.map((item) => (
+            <button
+              key={item.id}
+              onClick={() => setMode(item.id)}
+              title={item.hint}
+              className={cn(
+                "shrink-0 rounded-lg border px-2.5 py-1 text-[10px] font-medium transition",
+                mode === item.id
+                  ? "border-primary/35 bg-primary/[0.12] text-primary"
+                  : "border-transparent text-muted-foreground hover:border-border hover:bg-muted/50 hover:text-foreground",
+              )}
+            >
+              {item.label}
+            </button>
+          ))}
+          <Button variant="ghost" size="sm" className="ml-auto shrink-0 text-[10px]" onClick={() => setEvaluateOpen(true)}>
+            <ClipboardCheck size={12} /> Grade answer
+          </Button>
+        </div>
+
         {!aiStatus?.configured ? (
           <div className="mx-4 mt-3 flex items-start gap-2 rounded-xl border border-warning/25 bg-warning/[0.08] px-3 py-2 text-[11px] leading-5 text-warning">
             <Brain size={14} className="mt-0.5 shrink-0" />
@@ -346,7 +429,19 @@ export default function Tutor() {
                   <div className={cn("max-w-[85%]", message.role === "user" ? "rounded-2xl rounded-br-md bg-primary/[0.15] px-4 py-3 text-sm leading-6" : "min-w-0 flex-1")}>
                     {message.role === "assistant" ? (
                       <>
-                        <Markdown content={message.content} />
+                        {message.content ? (
+                          <div className="relative">
+                            <Markdown content={message.content} />
+                            {message.streaming ? <span className="ml-0.5 inline-block h-3.5 w-1.5 animate-pulse rounded-sm bg-primary align-middle" /> : null}
+                          </div>
+                        ) : (
+                          <div className="flex items-center gap-2 rounded-2xl border border-border bg-muted/25 px-4 py-3 text-xs text-muted-foreground">
+                            <Loader2 size={13} className="animate-spin" /> Retrieving your notes and thinking…
+                          </div>
+                        )}
+                        {message.note ? (
+                          <p className="mt-2 rounded-lg border border-warning/25 bg-warning/[0.07] px-3 py-2 text-[10px] leading-4 text-warning">{message.note}</p>
+                        ) : null}
                         {message.sources.length > 0 ? (
                           <details className="group mt-3 rounded-xl border border-border/70 bg-muted/25 p-3">
                             <summary className="flex cursor-pointer list-none items-center gap-1.5 text-[11px] font-medium text-primary">
@@ -355,8 +450,11 @@ export default function Tutor() {
                             </summary>
                             <div className="mt-2 space-y-2">
                               {message.sources.map((source) => (
-                                <div key={`${source.document_id}-${source.page}-${source.index}`} className="rounded-lg border border-border/60 bg-card/60 p-2.5">
-                                  <p className="text-[10px] font-medium text-foreground">{source.document} · page {source.page}{source.heading ? ` · ${source.heading}` : ""}</p>
+                                <div key={`${source.document_id}-${source.page}-${source.index}`} className={cn("rounded-lg border p-2.5", source.cited ? "border-primary/35 bg-primary/[0.06]" : "border-border/60 bg-card/60")}>
+                                  <p className="text-[10px] font-medium text-foreground">
+                                    {source.label ? <span className="mr-1.5 rounded bg-primary/10 px-1 py-0.5 font-mono text-[9px] text-primary">{source.label}</span> : null}
+                                    {source.document} · page {source.page}{source.heading ? ` · ${source.heading}` : ""}
+                                  </p>
                                   <p className="mt-1 line-clamp-3 text-[10px] leading-4 text-muted-foreground">{source.snippet}</p>
                                 </div>
                               ))}
@@ -364,10 +462,13 @@ export default function Tutor() {
                           </details>
                         ) : null}
                         <div className="mt-2 flex items-center gap-1">
-                          <Button variant="ghost" size="icon-sm" onClick={() => speak(message)} aria-label="Read answer aloud">
+                          <Button variant="ghost" size="icon-sm" onClick={() => speak(message)} aria-label="Read answer aloud" disabled={message.streaming || !message.content}>
                             {speakingId === message.id ? <Square size={12} /> : <Volume2 size={13} />}
                           </Button>
-                          <span className="text-[9px] text-muted-foreground">{message.role === "assistant" ? "Study Buddy" : ""}</span>
+                          <span className="text-[9px] text-muted-foreground">
+                            {personalities.find((item) => item.id === personality)?.label || "Study Buddy"}
+                            {message.generator === "offline" ? " · offline retrieval" : message.generator === "ai" ? " · AI + your sources" : ""}
+                          </span>
                         </div>
                       </>
                     ) : message.content}
@@ -412,18 +513,31 @@ export default function Tutor() {
                 </Button>
                 <Button variant="ghost" size="icon-sm" onClick={() => setInput("")} aria-label="Clear input" disabled={!input}><Trash2 size={14} /></Button>
                 <span className="ml-auto flex items-center gap-1 text-[9px] text-muted-foreground">
-                  <Headphones size={10} /> Voice questions supported
+                  <Headphones size={10} /> Voice input where available
                   <span className="kbd ml-2">Enter</span>
                 </span>
-                <Button size="icon-sm" onClick={() => sendMessage(input)} disabled={!input.trim() || sending} aria-label="Send message">
-                  <ArrowUp size={15} />
-                </Button>
+                {sending ? (
+                  <Button size="icon-sm" variant="danger" onClick={stopStreaming} aria-label="Stop generating">
+                    <Square size={13} />
+                  </Button>
+                ) : (
+                  <Button size="icon-sm" onClick={() => sendMessage(input)} disabled={!input.trim()} aria-label="Send message">
+                    <ArrowUp size={15} />
+                  </Button>
+                )}
               </div>
             </div>
             <p className="mt-1.5 text-center text-[9px] text-muted-foreground">AI can make mistakes. Verify citations and derivations against your textbook.</p>
           </div>
         </div>
       </div>
+
+      <EvaluateDialog
+        open={evaluateOpen}
+        onClose={() => setEvaluateOpen(false)}
+        subjectId={subjectId === "" ? undefined : Number(subjectId)}
+        initialQuestion={lastQuestion}
+      />
 
       <AnimatePresence>
         {conversationOpen ? (

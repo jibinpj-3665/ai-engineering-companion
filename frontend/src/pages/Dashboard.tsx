@@ -229,6 +229,33 @@ export default function Dashboard() {
             </CardContent>
           </Card>
 
+          {data.semesters?.length ? (
+            <Card>
+              <CardHeader className="flex-row items-center justify-between">
+                <div>
+                  <CardTitle className="flex items-center gap-2"><GraduationCap size={16} className="text-primary" /> Semester progress</CardTitle>
+                  <p className="mt-1 text-xs text-muted-foreground">Imported syllabus structure and your weighted completion.</p>
+                </div>
+                <Link to="/syllabus-library" className="text-xs text-primary hover:underline">Syllabus library</Link>
+              </CardHeader>
+              <CardContent className="space-y-2.5">
+                {data.semesters.map((semester) => (
+                  <button key={`${semester.semester}-${semester.academic_year}`} onClick={() => navigate("/syllabus-library")} className="w-full rounded-xl border border-border/60 bg-muted/20 p-3 text-left transition hover:border-primary/30">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <p className="text-sm font-semibold">{semester.semester}</p>
+                        {semester.academic_year ? <Badge>{semester.academic_year}</Badge> : null}
+                      </div>
+                      <span className="text-xs font-medium">{semester.completion}%</span>
+                    </div>
+                    <Progress value={semester.completion} className="mt-2" />
+                    <p className="mt-1.5 text-[10px] text-muted-foreground">{semester.subjects} subjects · {semester.modules} modules · {semester.topics} topics · {semester.mastered} mastered{semester.credits ? ` · ${semester.credits} credits` : ""}</p>
+                  </button>
+                ))}
+              </CardContent>
+            </Card>
+          ) : null}
+
           <Card>
             <CardHeader className="flex-row items-center justify-between">
               <CardTitle>Subject progress</CardTitle>

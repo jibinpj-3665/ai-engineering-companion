@@ -1,6 +1,8 @@
+import io
 import json
 import re
 import shutil
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List
@@ -9,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from ..ai.providers import embed_texts_sync
 from ..ai.rag import build_chunk_records
-from ..database import SessionLocal
+from ..database import SessionLocal, reset_current_user, set_current_user
 from ..models import Document, DocumentChunk, Notification, Subject
 
 _HEADING_RE = re.compile(r"^(module|unit|chapter|section|topic)\s+[0-9ivx]+", re.IGNORECASE)
@@ -21,6 +23,41 @@ def _utcnow() -> datetime:
 
 def ocr_available() -> bool:
     return shutil.which("tesseract") is not None
+
+
+def validate_upload(path: Path, suffix: str) -> None:
+    """Reject renamed binaries before they reach an extractor."""
+    with path.open("rb") as handle:
+        head = handle.read(8192)
+    if suffix == ".pdf":
+        if not head.startswith(b"%PDF-"):
+            raise RuntimeError("This file is not a valid PDF (missing PDF signature).")
+        return
+    if suffix in {".docx", ".pptx"}:
+        if not head.startswith(b"PK\x03\x04"):
+            raise RuntimeError("This Office file is not a valid DOCX/PPTX archive.")
+        try:
+            with zipfile.ZipFile(path) as archive:
+                names = set(archive.namelist())
+        except zipfile.BadZipFile as exc:
+            raise RuntimeError("This Office file is corrupt or unreadable.") from exc
+        required = "word/" if suffix == ".docx" else "ppt/"
+        if not any(name.startswith(required) for name in names):
+            raise RuntimeError(f"This archive does not contain the expected {suffix[1:]} document structure.")
+        return
+    if suffix in {".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff"}:
+        try:
+            from PIL import Image
+
+            with Image.open(path) as image:
+                image.verify()
+        except Exception as exc:
+            raise RuntimeError("This image could not be decoded.") from exc
+        return
+    if suffix in {".txt", ".md"}:
+        if b"\x00" in head:
+            raise RuntimeError("Text uploads must not contain binary data.")
+        return
 
 
 def _ocr_image(path: Path) -> str:
@@ -239,13 +276,19 @@ def _update_notification(db: Session, document: Document) -> None:
     ))
 
 
+def set_stage(db: Session, document: Document, status: str, stage: str, progress: int, error: str = "") -> None:
+    document.status = status
+    document.stage = stage
+    document.progress = max(0, min(100, progress))
+    document.error = error[:1000]
+    db.commit()
+
+
 def process_document(db: Session, document_id: int) -> None:
     document = db.get(Document, document_id)
     if not document:
         return
-    document.status = "processing"
-    document.error = ""
-    db.commit()
+    set_stage(db, document, "extracting", "Reading pages and extracting text", 15)
     try:
         path = Path(document.stored_path)
         if not path.exists():
@@ -253,12 +296,11 @@ def process_document(db: Session, document_id: int) -> None:
         pages = extract_document(path)
         if not pages:
             raise RuntimeError("No extractable text was found in this document.")
-        document.pages_json = json.dumps(pages, ensure_ascii=False)
-        document.page_count = len([p for p in pages if p.get("page", 0) > 0])
-        db.query(DocumentChunk).filter(DocumentChunk.document_id == document.id).delete()
+        set_stage(db, document, "extracting", "Building study sections", 35)
         records = build_chunk_records(pages)
         if not records:
             raise RuntimeError("Text was extracted but no study chunks could be built.")
+        set_stage(db, document, "indexing", f"Embedding {len(records)} sections", 45)
         vectors: List[List[float]] = []
         provider = "local-hash-v1"
         batch_size = 16
@@ -266,6 +308,9 @@ def process_document(db: Session, document_id: int) -> None:
             batch = records[start:start + batch_size]
             batch_vectors, provider = embed_texts_sync(db, [item["content"] for item in batch])
             vectors.extend(batch_vectors)
+            progress = 45 + int(45 * min(1.0, (start + len(batch)) / max(1, len(records))))
+            set_stage(db, document, "indexing", f"Embedding sections ({progress}%)", progress)
+        db.query(DocumentChunk).filter(DocumentChunk.document_id == document.id).delete(synchronize_session=False)
         for record, vector in zip(records, vectors):
             db.add(DocumentChunk(
                 document_id=document.id,
@@ -276,7 +321,12 @@ def process_document(db: Session, document_id: int) -> None:
                 embedding=json.dumps([round(v, 6) for v in vector]),
                 embed_provider=provider,
             ))
+        document.pages_json = json.dumps(pages, ensure_ascii=False)
+        document.page_count = len([p for p in pages if p.get("page", 0) > 0])
         document.status = "ready"
+        document.stage = "ready"
+        document.progress = 100
+        document.error = ""
         document.processed_at = _utcnow()
         _update_notification(db, document)
         db.commit()
@@ -284,17 +334,34 @@ def process_document(db: Session, document_id: int) -> None:
         db.rollback()
         document = db.get(Document, document_id)
         if document:
-            document.status = "failed"
-            document.error = str(exc)[:1000]
-            db.commit()
+            set_stage(db, document, "failed", "Processing failed", 100, str(exc))
 
 
-def process_document_task(document_id: int) -> None:
+def process_document_task(document_id: int, user_id: int | None = None) -> None:
+    token = set_current_user(user_id) if user_id is not None else None
     db = SessionLocal()
     try:
         process_document(db, document_id)
     finally:
         db.close()
+        if token is not None:
+            reset_current_user(token)
+
+
+def recover_pending_documents() -> int:
+    db = SessionLocal()
+    try:
+        pending = (
+            db.query(Document)
+            .filter(Document.status.in_(("queued", "processing", "extracting", "indexing")))
+            .all()
+        )
+        work = [(document.id, document.user_id) for document in pending]
+    finally:
+        db.close()
+    for document_id, user_id in work:
+        process_document_task(document_id, user_id)
+    return len(work)
 
 
 def reindex_subject_documents(db: Session, subject_id: int | None = None) -> int:

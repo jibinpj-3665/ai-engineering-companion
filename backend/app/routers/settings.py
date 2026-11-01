@@ -1,8 +1,4 @@
-import shutil
-import sqlite3
 import tempfile
-import zipfile
-from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
@@ -10,14 +6,17 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from ..config import BACKUP_DIR, DATABASE_PATH, UPLOAD_DIR
-from ..database import SessionLocal, engine, get_db, init_db
+from ..config import ENV_KEYS_ONLY
+from ..database import SessionLocal, current_user_id, get_db, reset_current_user, set_current_user
 from ..models import Notification
 from ..serializers import notification_dict
+from ..services.backup import MAX_RESTORE_BYTES, export_user_backup, restore_user_backup
 from ..services.documents import reindex_subject_documents
 from ..services.settings import get_ai_config, public_settings, update_settings
 
 router = APIRouter(tags=["settings"])
+
+PROVIDERS = {"offline", "openai", "gemini", "groq", "custom", "local", "openai_compatible", "ollama", "google"}
 
 
 class SettingsUpdate(BaseModel):
@@ -40,20 +39,27 @@ class SettingsUpdate(BaseModel):
     onboarding_complete: str | None = None
 
 
-@router.get("/settings")
-def get_settings_route(db: Session = Depends(get_db)):
+def _settings_response(db: Session) -> dict:
     data = public_settings(db)
     cfg = get_ai_config(db)
     data["ai_configured"] = cfg["configured"]
     data["effective_base_url"] = cfg["base_url"]
     data["effective_model"] = cfg["model"]
+    data["key_source"] = cfg["key_source"]
+    data["env_key_set"] = cfg["env_key_set"]
+    data["env_keys_only"] = ENV_KEYS_ONLY
     return data
+
+
+@router.get("/settings")
+def get_settings_route(db: Session = Depends(get_db)):
+    return _settings_response(db)
 
 
 @router.put("/settings")
 def put_settings(payload: SettingsUpdate, db: Session = Depends(get_db)):
     updates = payload.model_dump(exclude_none=True)
-    if "ai_provider" in updates and updates["ai_provider"] not in {"offline", "openai", "openai_compatible", "local"}:
+    if "ai_provider" in updates and updates["ai_provider"] not in PROVIDERS:
         raise HTTPException(status_code=400, detail="Unsupported AI provider")
     if "embedding_provider" in updates and updates["embedding_provider"] not in {"local", "remote"}:
         raise HTTPException(status_code=400, detail="Embedding provider must be local or remote")
@@ -68,63 +74,62 @@ def put_settings(payload: SettingsUpdate, db: Session = Depends(get_db)):
             raise HTTPException(status_code=400, detail="Daily goal must be a number") from exc
         if goal < 15 or goal > 900:
             raise HTTPException(status_code=400, detail="Daily goal must be between 15 and 900 minutes")
+    if "ai_temperature" in updates:
+        try:
+            temperature = float(updates["ai_temperature"])
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Temperature must be a number") from exc
+        if temperature < 0 or temperature > 2:
+            raise HTTPException(status_code=400, detail="Temperature must be between 0 and 2")
+    if "ai_max_tokens" in updates:
+        try:
+            tokens = int(updates["ai_max_tokens"])
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Max tokens must be a number") from exc
+        if tokens < 128 or tokens > 32000:
+            raise HTTPException(status_code=400, detail="Max tokens must be between 128 and 32000")
     update_settings(db, updates)
-    data = public_settings(db)
-    cfg = get_ai_config(db)
-    data["ai_configured"] = cfg["configured"]
-    data["effective_base_url"] = cfg["base_url"]
-    data["effective_model"] = cfg["model"]
-    return data
+    return _settings_response(db)
 
 
-def _reindex_task() -> None:
+def _reindex_task(uid: int) -> None:
+    token = set_current_user(uid)
     db = SessionLocal()
     try:
         reindex_subject_documents(db)
     finally:
         db.close()
+        reset_current_user(token)
 
 
 @router.post("/settings/reindex")
 def reindex(background: BackgroundTasks, db: Session = Depends(get_db)):
-    background.add_task(_reindex_task)
-    return {"ok": True, "message": "Re-indexing started in the background. Embeddings will use the current provider."}
-
-
-def _backup_zip() -> Path:
-    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    target = BACKUP_DIR / f"ai-engineering-companion-backup-{stamp}.zip"
-    temp_db = BACKUP_DIR / f".tmp-{stamp}.db"
-    source = sqlite3.connect(str(DATABASE_PATH))
-    destination = sqlite3.connect(str(temp_db))
-    with destination:
-        source.backup(destination)
-    source.close()
-    destination.close()
-    with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
-        archive.write(temp_db, "aec.db")
-        if UPLOAD_DIR.exists():
-            for path in UPLOAD_DIR.glob("*"):
-                if path.is_file():
-                    archive.write(path, f"uploads/{path.name}")
-    temp_db.unlink(missing_ok=True)
-    return target
+    uid = current_user_id.get()
+    if uid is None:
+        raise HTTPException(status_code=401, detail="Authentication required.")
+    background.add_task(_reindex_task, uid)
+    return {"ok": True, "message": "Re-indexing started in the background with the current embedding provider."}
 
 
 @router.post("/backup")
-def create_backup():
+def create_backup(db: Session = Depends(get_db)):
     try:
-        path = _backup_zip()
+        path = export_user_backup(db)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Backup failed: {exc}") from exc
-    return {"ok": True, "filename": path.name, "path": str(path)}
+    return {
+        "ok": True,
+        "filename": path.name,
+        "path": str(path),
+        "scope": "current account only",
+        "credentials_excluded": True,
+    }
 
 
 @router.get("/backup/download")
-def download_backup():
+def download_backup(db: Session = Depends(get_db)):
     try:
-        path = _backup_zip()
+        path = export_user_backup(db)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Backup failed: {exc}") from exc
     return FileResponse(path, filename=path.name, media_type="application/zip")
@@ -134,42 +139,27 @@ def download_backup():
 async def restore_backup(file: UploadFile = File(...), db: Session = Depends(get_db)):
     if not (file.filename or "").lower().endswith(".zip"):
         raise HTTPException(status_code=400, detail="Restore requires a .zip backup created by this app.")
-    data = await file.read()
-    if len(data) > 500 * 1024 * 1024:
-        raise HTTPException(status_code=413, detail="Backup archive is too large.")
     with tempfile.TemporaryDirectory() as temp_dir:
         archive_path = Path(temp_dir) / "restore.zip"
-        archive_path.write_bytes(data)
-        extract_dir = Path(temp_dir) / "extract"
-        extract_dir.mkdir()
+        total = 0
+        with archive_path.open("wb") as handle:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > MAX_RESTORE_BYTES:
+                    raise HTTPException(status_code=413, detail="Backup archive is too large.")
+                handle.write(chunk)
         try:
-            with zipfile.ZipFile(archive_path) as archive:
-                for member in archive.infolist():
-                    resolved = (extract_dir / member.filename).resolve()
-                    if not str(resolved).startswith(str(extract_dir.resolve())):
-                        raise HTTPException(status_code=400, detail="Backup archive contains unsafe paths.")
-                archive.extractall(extract_dir)
-        except zipfile.BadZipFile as exc:
-            raise HTTPException(status_code=400, detail="Invalid zip archive.") from exc
-        db_file = extract_dir / "aec.db"
-        if not db_file.exists():
-            raise HTTPException(status_code=400, detail="Backup does not contain an aec.db database.")
-        _backup_zip()
-        db.close()
-        engine.dispose()
-        for suffix in ("", "-wal", "-shm"):
-            latent = Path(str(DATABASE_PATH) + suffix)
-            if latent.exists():
-                latent.unlink()
-        shutil.copy2(db_file, DATABASE_PATH)
-        uploads = extract_dir / "uploads"
-        if uploads.exists():
-            UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-            for item in uploads.glob("*"):
-                if item.is_file():
-                    shutil.copy2(item, UPLOAD_DIR / item.name)
-        init_db()
-    return {"ok": True, "message": "Backup restored. Reload the application.", "reload": True}
+            result = restore_user_backup(db, archive_path)
+        except ValueError as exc:
+            db.rollback()
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            db.rollback()
+            raise HTTPException(status_code=500, detail=f"Restore failed: {exc}") from exc
+    return {**result, "reload": True}
 
 
 @router.get("/notifications")

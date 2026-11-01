@@ -3,6 +3,7 @@ import { useSearchParams } from "react-router-dom";
 import {
   AlertCircle,
   CheckCircle2,
+  Download,
   Eye,
   FileImage,
   FileText,
@@ -15,7 +16,7 @@ import {
   UploadCloud,
 } from "lucide-react";
 import { api, ApiError } from "../lib/api";
-import type { DocumentRecord, SearchResult } from "../lib/types";
+import type { DocumentCapabilities, DocumentRecord, SearchResult } from "../lib/types";
 import { useApp } from "../contexts/AppContext";
 import { useToast } from "../components/ui/Toast";
 import { PageHeader } from "../components/PageHeader";
@@ -26,6 +27,7 @@ import { Input, Select } from "../components/ui/Input";
 import { EmptyState } from "../components/ui/EmptyState";
 import { Badge } from "../components/ui/Badge";
 import { Spinner } from "../components/ui/Spinner";
+import { Progress } from "../components/ui/Progress";
 import { cn, formatBytes, formatDateTime } from "../lib/utils";
 
 const kindLabels: Record<string, string> = {
@@ -44,6 +46,8 @@ export default function Documents() {
   const [documents, setDocuments] = useState<DocumentRecord[]>([]);
   const [docKind, setDocKind] = useState("notes");
   const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<{ name: string; percent: number; index: number; total: number } | null>(null);
+  const [capabilities, setCapabilities] = useState<DocumentCapabilities | null>(null);
   const [dragging, setDragging] = useState(false);
   const [preview, setPreview] = useState<{ document: DocumentRecord; pages: { page: number; text: string; heading: string }[] } | null>(null);
   const [deleting, setDeleting] = useState<DocumentRecord | null>(null);
@@ -64,12 +68,13 @@ export default function Documents() {
 
   useEffect(() => {
     load();
+    api.documentCapabilities().then(setCapabilities).catch(() => setCapabilities(null));
   }, [load]);
 
   useEffect(() => {
-    const pending = documents.some((document) => document.status === "queued" || document.status === "processing");
+    const pending = documents.some((document) => ["queued", "processing", "extracting", "indexing"].includes(document.status));
     if (!pending) return;
-    const timer = window.setInterval(load, 1800);
+    const timer = window.setInterval(load, 1500);
     return () => window.clearInterval(timer);
   }, [documents, load]);
 
@@ -105,17 +110,25 @@ export default function Documents() {
     if (!files.length) return;
     setUploading(true);
     let success = 0;
-    for (const file of Array.from(files)) {
+    const list = Array.from(files);
+    for (const [index, file] of list.entries()) {
+      setUploadProgress({ name: file.name, percent: 0, index: index + 1, total: list.length });
       try {
-        await api.uploadDocument(file, subjectId === "" ? undefined : Number(subjectId), docKind);
+        await api.uploadDocument(
+          file,
+          subjectId === "" ? undefined : Number(subjectId),
+          docKind,
+          (percent) => setUploadProgress({ name: file.name, percent, index: index + 1, total: list.length }),
+        );
         success += 1;
       } catch (error) {
         toast(`Could not upload ${file.name}`, error instanceof ApiError ? error.message : "Unexpected error", "error");
       }
     }
     setUploading(false);
+    setUploadProgress(null);
     if (success) {
-      toast(`${success} file${success > 1 ? "s" : ""} queued`, "Text extraction and indexing run in the background.", "success");
+      toast(`${success} file${success > 1 ? "s" : ""} uploaded`, "Text extraction and indexing run in the background; progress updates below.", "success");
       await load();
     }
   };
@@ -154,14 +167,15 @@ export default function Documents() {
   const statusBadge = (document: DocumentRecord) => {
     if (document.status === "ready") return <Badge className="border-success/25 bg-success/[0.08] text-success"><CheckCircle2 size={10} /> Ready</Badge>;
     if (document.status === "failed") return <Badge className="border-danger/25 bg-danger/[0.08] text-danger"><AlertCircle size={10} /> Failed</Badge>;
-    return <Badge className="border-warning/25 bg-warning/[0.08] text-warning"><Loader2 size={10} className="animate-spin" /> {document.status}</Badge>;
+    const label = document.stage || (document.status === "queued" ? "queued" : document.status);
+    return <Badge className="border-warning/25 bg-warning/[0.08] text-warning"><Loader2 size={10} className="animate-spin" /> {label} {document.progress > 0 ? `${document.progress}%` : ""}</Badge>;
   };
 
   return (
     <div>
       <PageHeader
         title="Knowledge Base"
-        subtitle="Upload notes, textbooks, lab manuals, question papers and syllabi. Everything is indexed locally for grounded answers."
+        subtitle="Upload notes, textbooks, lab manuals, question papers and syllabi. Material is indexed for private, cited retrieval."
         actions={
           <div className="flex items-center gap-2">
             <Select value={subjectId} onChange={(event) => updateSubject(event.target.value)} className="w-48">
@@ -179,7 +193,7 @@ export default function Documents() {
         ref={fileInput}
         type="file"
         multiple
-        accept=".pdf,.docx,.pptx,.txt,.md,.png,.jpg,.jpeg,.webp,.tif,.tiff"
+        accept={capabilities?.allowed_extensions?.length ? capabilities.allowed_extensions.join(",") : ".pdf,.docx,.pptx,.txt,.md,.png,.jpg,.jpeg,.webp,.tif,.tiff"}
         className="hidden"
         onChange={(event) => {
           if (event.target.files) uploadFiles(event.target.files);
@@ -233,7 +247,7 @@ export default function Documents() {
                 ) : (
                   searchResult.sources.map((source) => (
                     <div key={`${source.document_id}-${source.page}-${source.index}`} className="rounded-lg border border-border/60 bg-muted/30 p-2.5">
-                      <p className="text-[10px] font-medium text-primary">{source.document} · page {source.page}</p>
+                      <p className="text-[10px] font-medium text-primary">{source.label ? `${source.label} · ` : ""}{source.document} · page {source.page}</p>
                       <p className="mt-1 line-clamp-2 text-[11px] leading-4 text-muted-foreground">{source.snippet}</p>
                     </div>
                   ))
@@ -309,7 +323,14 @@ export default function Documents() {
         <p className="text-sm text-muted-foreground">Generated quizzes and flashcards remain, but AI answers will no longer cite this document.</p>
       </Dialog>
 
-      {uploading ? <div className="fixed bottom-5 left-1/2 z-50 -translate-x-1/2 rounded-full border border-border bg-card px-4 py-2 shadow-panel"><Spinner label="Uploading files" /></div> : null}
+      {uploading ? (
+        <div className="fixed bottom-20 left-1/2 z-50 w-[min(360px,calc(100vw-2rem))] -translate-x-1/2 rounded-2xl border border-border bg-card p-4 shadow-panel lg:bottom-5">
+          <div className="flex items-center gap-2 text-xs font-medium"><Spinner label="" /> Uploading {uploadProgress?.index || 1} of {uploadProgress?.total || 1}</div>
+          <p className="mt-1 truncate text-[10px] text-muted-foreground">{uploadProgress?.name}</p>
+          <Progress value={uploadProgress?.percent || 0} className="mt-2" />
+          <p className="mt-1 text-right text-[9px] text-muted-foreground">{uploadProgress?.percent || 0}%</p>
+        </div>
+      ) : null}
     </div>
   );
 }

@@ -147,7 +147,7 @@ def _question_paper_frequency(db: Session, subject_id: int, title: str) -> tuple
         db.query(DocumentChunk)
         .join(Document, DocumentChunk.document_id == Document.id)
         .filter(Document.subject_id == subject_id)
-        .filter(Document.status == "ready")
+        .filter(Document.status == "ready", Document.active == True)  # noqa: E712
         .filter((Document.doc_kind == "question_paper") | (Document.filename.ilike("%question%")) | (Document.filename.ilike("%paper%")))
         .all()
     )
@@ -283,7 +283,7 @@ def coverage(db: Session, subject_id: int) -> dict:
     chunks = (
         db.query(DocumentChunk, Document)
         .join(Document, DocumentChunk.document_id == Document.id)
-        .filter(DocumentChunk.subject_id == subject_id, Document.status == "ready")
+        .filter(DocumentChunk.subject_id == subject_id, Document.status == "ready", Document.active == True)  # noqa: E712
         .all()
     )
     mapped = []

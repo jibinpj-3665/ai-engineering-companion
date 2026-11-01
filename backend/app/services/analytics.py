@@ -12,6 +12,7 @@ from ..models import (
     ScheduleSession,
     StudySession,
     Subject,
+    SyllabusModule,
     SyllabusTopic,
     utcnow,
 )
@@ -95,6 +96,42 @@ def subject_progress(db: Session) -> list:
     return output
 
 
+def semester_progress(db: Session) -> list:
+    subjects = db.query(Subject).order_by(Subject.semester, Subject.name).all()
+    buckets = {}
+    for subject in subjects:
+        semester = subject.semester or "Unassigned"
+        bucket = buckets.setdefault(semester, {
+            "semester": semester,
+            "academic_year": subject.academic_year or "",
+            "subjects": 0,
+            "modules": 0,
+            "topics": 0,
+            "mastered": 0,
+            "learned": 0,
+            "in_progress": 0,
+            "completion": 0.0,
+            "credits": 0,
+        })
+        topics = db.query(SyllabusTopic).filter(SyllabusTopic.subject_id == subject.id).all()
+        bucket["subjects"] += 1
+        bucket["modules"] += db.query(SyllabusModule).filter(SyllabusModule.subject_id == subject.id).count()
+        bucket["topics"] += len(topics)
+        bucket["mastered"] += len([topic for topic in topics if topic.status == "mastered"])
+        bucket["learned"] += len([topic for topic in topics if topic.status == "learned"])
+        bucket["in_progress"] += len([topic for topic in topics if topic.status == "in_progress"])
+        bucket["credits"] += subject.credits or 0
+        bucket["completion"] += sum(
+            100 if topic.status == "mastered" else 75 if topic.status == "learned" else 35 if topic.status == "in_progress" else 0
+            for topic in topics
+        )
+        if not bucket["academic_year"] and subject.academic_year:
+            bucket["academic_year"] = subject.academic_year
+    for bucket in buckets.values():
+        bucket["completion"] = round(bucket["completion"] / max(1, bucket["topics"]), 1)
+    return sorted(buckets.values(), key=lambda item: (item["semester"] == "Unassigned", item["semester"]))
+
+
 def daily_minutes(db: Session, days: int = 7) -> list:
     start = date.today() - timedelta(days=days - 1)
     buckets = {start + timedelta(days=i): 0.0 for i in range(days)}
@@ -158,6 +195,7 @@ def analytics_overview(db: Session) -> dict:
         "streak_days": streak_days(db),
         "revision": revision,
         "subjects": subject_rows,
+        "semesters": semester_progress(db),
         "daily": daily_minutes(db, 7),
         "weak_topics": weak_topics(db),
         "recent_attempts": [
@@ -266,6 +304,7 @@ def dashboard(db: Session) -> dict:
             "exam_readiness": overview["exam_readiness"],
         },
         "subjects": overview["subjects"],
+        "semesters": overview["semesters"],
         "daily": overview["daily"],
         "weak_topics": overview["weak_topics"],
         "revision": overview["revision"],

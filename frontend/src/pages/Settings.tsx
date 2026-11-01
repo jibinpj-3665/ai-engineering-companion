@@ -4,8 +4,11 @@ import {
   CheckCircle2,
   Database,
   Download,
+  Eye,
+  EyeOff,
   HardDrive,
   Keyboard,
+  ListChecks,
   Palette,
   RefreshCw,
   Save,
@@ -17,7 +20,7 @@ import {
   Zap,
 } from "lucide-react";
 import { api, ApiError } from "../lib/api";
-import type { Settings as SettingsType } from "../lib/types";
+import type { AIUsageResponse, ProviderPreset, Settings as SettingsType } from "../lib/types";
 import { useApp } from "../contexts/AppContext";
 import { useToast } from "../components/ui/Toast";
 import { PageHeader } from "../components/PageHeader";
@@ -27,6 +30,7 @@ import { Input, Select, Textarea } from "../components/ui/Input";
 import { Badge } from "../components/ui/Badge";
 import { Switch } from "../components/ui/Switch";
 import { Spinner } from "../components/ui/Spinner";
+import { AccountCard } from "../components/AccountCard";
 import { cn } from "../lib/utils";
 
 const accents = [
@@ -46,10 +50,14 @@ const personalities = [
 ];
 
 export default function Settings() {
-  const { settings, setSettings, aiStatus, refreshAIStatus, loading } = useApp();
+  const { settings, setSettings, aiStatus, refreshAIStatus, loading, user, authRequired, envKeysOnly } = useApp();
   const { toast } = useToast();
   const [form, setForm] = useState<SettingsType | null>(settings);
   const [apiKey, setApiKey] = useState("");
+  const [showKey, setShowKey] = useState(false);
+  const [providers, setProviders] = useState<ProviderPreset[]>([]);
+  const [models, setModels] = useState<string[]>([]);
+  const [usage, setUsage] = useState<AIUsageResponse | null>(null);
   const [savingAI, setSavingAI] = useState(false);
   const [savingProfile, setSavingProfile] = useState(false);
   const [testing, setTesting] = useState(false);
@@ -59,9 +67,44 @@ export default function Settings() {
 
   useEffect(() => { if (settings) setForm(settings); }, [settings]);
 
+  useEffect(() => {
+    api.aiProviders().then((data) => setProviders(data.providers)).catch(() => setProviders([]));
+    api.aiUsage(20).then(setUsage).catch(() => setUsage(null));
+  }, []);
+
   if (loading || !form) return <div className="py-24"><Spinner label="Loading preferences" /></div>;
 
   const update = (key: keyof SettingsType, value: string) => setForm((current) => current ? { ...current, [key]: value } : current);
+
+  const applyProvider = (id: string) => {
+    const preset = providers.find((item) => item.id === id);
+    setForm((current) => {
+      if (!current) return current;
+      const next = { ...current, ai_provider: id };
+      if (preset) {
+        if (id === "local") {
+          next.local_base_url = preset.base_url || current.local_base_url;
+          next.local_model = preset.model || current.local_model;
+        } else if (id !== "offline") {
+          next.ai_base_url = preset.base_url;
+          next.ai_model = preset.model;
+        }
+      }
+      return next;
+    });
+    setModels([]);
+  };
+
+  const fetchModels = async () => {
+    try {
+      const list = await api.aiModels();
+      setModels(list.models);
+      if (list.models.length === 0) toast("No models returned", list.message || "The provider did not list any models.", "warning");
+      else toast("Models loaded", `${list.models.length} model${list.models.length > 1 ? "s" : ""} available from ${list.provider}.`, "success");
+    } catch (error) {
+      toast("Could not load models", error instanceof ApiError ? error.message : "Unexpected error", "error");
+    }
+  };
 
   const saveProfile = async () => {
     setSavingProfile(true);
@@ -101,7 +144,10 @@ export default function Settings() {
       const updated = await api.updateSettings(payload);
       setSettings(updated);
       setApiKey("");
+      setForm(updated);
       await refreshAIStatus();
+      api.aiProviders().then((data) => setProviders(data.providers)).catch(() => undefined);
+      api.aiUsage(20).then(setUsage).catch(() => undefined);
       toast("AI settings saved", updated.ai_configured ? "Provider configuration is complete." : "Saved. Add the missing fields to activate the provider.", "success");
       if (thenTest) await testConnection();
     } catch (error) {
@@ -152,10 +198,20 @@ export default function Settings() {
 
   const provider = form.ai_provider;
   const usesRemote = provider !== "offline";
+  const providerOptions = providers.length ? providers : [
+    { id: "offline", label: "Offline retrieval only", base_url: "", model: "", requires_key: false, note: "", env_key_set: false, selected: provider === "offline" },
+    { id: "openai", label: "OpenAI", base_url: "https://api.openai.com/v1", model: "gpt-4o-mini", requires_key: true, note: "", env_key_set: false, selected: provider === "openai" },
+    { id: "gemini", label: "Google Gemini", base_url: "https://generativelanguage.googleapis.com/v1beta", model: "gemini-3.5-flash", requires_key: true, note: "", env_key_set: false, selected: provider === "gemini" },
+    { id: "groq", label: "Groq", base_url: "https://api.groq.com/openai/v1", model: "llama-3.3-70b-versatile", requires_key: true, note: "", env_key_set: false, selected: provider === "groq" },
+    { id: "local", label: "Ollama / local server", base_url: "http://127.0.0.1:11434/v1", model: "llama3.1", requires_key: false, note: "", env_key_set: false, selected: provider === "local" },
+    { id: "custom", label: "Custom OpenAI-compatible", base_url: "", model: "", requires_key: false, note: "", env_key_set: false, selected: provider === "custom" },
+  ];
+  const selectedPreset = providerOptions.find((item) => item.id === provider);
+  const envKeyActive = Boolean(selectedPreset?.env_key_set || form.key_source === "environment");
 
   return (
     <div className="space-y-5">
-      <PageHeader title="Settings" subtitle="Your profile, appearance, AI provider and local data — all stored on this device." actions={<Badge><ShieldCheck size={11} /> Local-first</Badge>} />
+      <PageHeader title="Settings" subtitle={authRequired ? "Your profile, appearance, AI provider and account data." : "Your profile, appearance, AI provider and local data."} actions={<Badge><ShieldCheck size={11} /> {authRequired ? "Account secured" : "Local-first"}</Badge>} />
 
       <div className="grid gap-4 xl:grid-cols-12">
         <div className="space-y-4 xl:col-span-7">
@@ -193,12 +249,10 @@ export default function Settings() {
               <div className="grid gap-3 sm:grid-cols-2">
                 <div>
                   <label className="label">Provider</label>
-                  <Select value={provider} onChange={(event) => update("ai_provider", event.target.value)}>
-                    <option value="offline">Offline (no AI API)</option>
-                    <option value="openai">OpenAI</option>
-                    <option value="openai_compatible">OpenAI-compatible</option>
-                    <option value="local">Local server (Ollama / LM Studio)</option>
+                  <Select value={provider} onChange={(event) => applyProvider(event.target.value)}>
+                    {providerOptions.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
                   </Select>
+                  {selectedPreset?.note ? <p className="mt-1 text-[10px] leading-4 text-muted-foreground">{selectedPreset.note}</p> : null}
                 </div>
                 <div>
                   <label className="label">Embedding mode</label>
@@ -223,8 +277,11 @@ export default function Settings() {
                   <div><label className="label">Model</label><Input value={form.ai_model} onChange={(event) => update("ai_model", event.target.value)} placeholder="gpt-4o-mini" /></div>
                   <div>
                     <label className="label">API key</label>
-                    <Input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder={form.ai_api_key_set ? "•••••••• saved — enter to replace" : "sk-…"} autoComplete="off" />
-                    <p className="mt-1 text-[10px] text-muted-foreground">Encrypted with a device-local key. Leave blank to keep the saved key.</p>
+                    <div className="flex gap-2">
+                      <Input type={showKey ? "text" : "password"} value={apiKey} onChange={(event) => setApiKey(event.target.value)} disabled={envKeysOnly} placeholder={envKeysOnly ? "Managed by server environment" : form.ai_api_key_set || envKeyActive ? "Saved - enter a new key to replace" : "sk-..."} autoComplete="off" />
+                      <Button type="button" variant="outline" size="sm" onClick={() => setShowKey((current) => !current)} disabled={envKeysOnly} aria-label={showKey ? "Hide API key" : "Show API key"}>{showKey ? <EyeOff size={13} /> : <Eye size={13} />}</Button>
+                    </div>
+                    <p className="mt-1 text-[10px] text-muted-foreground">{envKeysOnly || envKeyActive ? "This server supplies the key from environment variables, so stored account keys are not used." : "Encrypted in your account. Leave blank to keep the saved key."}</p>
                   </div>
                   <div><label className="label">Embedding model</label><Input value={form.ai_embedding_model} onChange={(event) => update("ai_embedding_model", event.target.value)} placeholder="text-embedding-3-small" /></div>
                 </div>
@@ -255,15 +312,50 @@ export default function Settings() {
         </div>
 
         <div className="space-y-4 xl:col-span-5">
+          <AccountCard />
+
           <Card>
-            <CardHeader><CardTitle className="flex items-center gap-2"><Database size={15} className="text-primary" /> Local data</CardTitle></CardHeader>
+            <CardHeader><CardTitle className="flex items-center gap-2"><ListChecks size={15} className="text-primary" /> AI usage</CardTitle></CardHeader>
+            <CardContent className="space-y-3">
+              {usage ? (
+                <>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div className="rounded-xl border border-border bg-muted/20 p-3"><p className="text-[10px] uppercase tracking-[0.15em] text-muted-foreground">Requests</p><p className="mt-1 font-display text-xl font-semibold">{usage.summary.requests}</p></div>
+                    <div className="rounded-xl border border-border bg-muted/20 p-3"><p className="text-[10px] uppercase tracking-[0.15em] text-muted-foreground">Errors</p><p className={cn("mt-1 font-display text-xl font-semibold", usage.summary.errors > 0 && "text-warning")}>{usage.summary.errors}</p></div>
+                  </div>
+                  {usage.logs.length === 0 ? (
+                    <p className="text-[11px] text-muted-foreground">No AI requests recorded yet.</p>
+                  ) : (
+                    <div className="max-h-64 space-y-1.5 overflow-y-auto pr-1">
+                      {usage.logs.map((log) => (
+                        <div key={log.id} className="flex items-center justify-between gap-2 rounded-lg border border-border/60 bg-muted/20 px-2.5 py-2 text-[10px]">
+                          <div className="min-w-0">
+                            <p className="truncate font-medium text-foreground">{log.operation} ? {log.model || log.provider}</p>
+                            <p className="text-muted-foreground">{new Date(log.created_at).toLocaleString()} ? {log.input_chars + log.output_chars} chars</p>
+                          </div>
+                          <div className="text-right">
+                            <span className={cn("rounded px-1.5 py-0.5", log.status === "ok" ? "bg-success/10 text-success" : "bg-danger/10 text-danger")}>{log.status}</span>
+                            <p className="mt-0.5 text-muted-foreground">{log.latency_ms} ms</p>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  <p className="text-[10px] leading-4 text-muted-foreground">Only metadata is logged: provider, model, operation, size and latency. Prompts and answers are not stored in this log.</p>
+                </>
+              ) : <p className="text-[11px] text-muted-foreground">Usage log is unavailable.</p>}
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader><CardTitle className="flex items-center gap-2"><Database size={15} className="text-primary" /> Workspace data</CardTitle></CardHeader>
             <CardContent className="space-y-3">
               <div className="flex items-center justify-between rounded-xl border border-border bg-muted/20 p-3">
-                <div><p className="text-xs font-medium">Download backup</p><p className="text-[10px] text-muted-foreground">Database + uploaded files as a .zip</p></div>
+                <div><p className="text-xs font-medium">Download backup</p><p className="text-[10px] text-muted-foreground">Your account data + files as a .zip; credentials excluded</p></div>
                 <a href={api.backupUrl()} className="inline-flex"><Button variant="outline" size="sm"><Download size={13} /> Backup</Button></a>
               </div>
               <div className="flex items-center justify-between rounded-xl border border-border bg-muted/20 p-3">
-                <div><p className="text-xs font-medium">Restore backup</p><p className="text-[10px] text-muted-foreground">Replaces current data after restart</p></div>
+                <div><p className="text-xs font-medium">Restore backup</p><p className="text-[10px] text-muted-foreground">Replaces only your account data</p></div>
                 <Button variant="outline" size="sm" onClick={() => fileRef.current?.click()} loading={restoring}><Upload size={13} /> Restore</Button>
                 <input ref={fileRef} type="file" accept=".zip" className="hidden" onChange={(event) => { const file = event.target.files?.[0]; if (file) restore(file); }} />
               </div>
@@ -273,7 +365,7 @@ export default function Settings() {
               </div>
               <div className="flex items-start gap-2 rounded-lg bg-muted/30 p-3 text-[10px] leading-4 text-muted-foreground">
                 <HardDrive size={13} className="mt-0.5 shrink-0" />
-                Data lives in <code className="break-all">%LOCALAPPDATA%\AIEngineeringCompanion</code>. Uninstalling the app does not delete your study data.
+                Desktop data lives in <code className="break-all">%LOCALAPPDATA%\AIEngineeringCompanion</code>. On a server, the administrator controls storage and backups. Exports never include AI credentials.
               </div>
             </CardContent>
           </Card>
@@ -295,7 +387,7 @@ export default function Settings() {
           <Card>
             <CardContent className="flex items-start gap-3 p-4">
               <CheckCircle2 size={16} className="mt-0.5 shrink-0 text-success" />
-              <div><p className="text-xs font-medium">AI Engineering Companion v1.0.0</p><p className="mt-1 text-[10px] leading-4 text-muted-foreground">Local-first study workspace for engineering students. Runs offline, stores data on your device, and never auto-completes topics without evidence.</p><p className="mt-2 text-[10px] text-muted-foreground">MIT License</p></div>
+              <div><p className="text-xs font-medium">AI Engineering Companion v1.3.0</p><p className="mt-1 text-[10px] leading-4 text-muted-foreground">Private engineering study workspace with accounts, grounded AI tutoring and evidence-based mastery. Offline retrieval stays available without a provider.</p><p className="mt-2 text-[10px] text-muted-foreground">MIT License</p></div>
             </CardContent>
           </Card>
         </div>
