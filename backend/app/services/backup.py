@@ -340,6 +340,8 @@ def _advance_postgres_sequences(db: Session) -> None:
     if not IS_POSTGRESQL:
         return
     for _table, model in EXPORT_ORDER:
+        if "id" not in model.__table__.columns:
+            continue
         table = model.__tablename__
         try:
             seq = db.execute(
