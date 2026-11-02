@@ -134,7 +134,7 @@ class Document(TenantMixin, Base):
     mime_type = Column(String(120), default="application/octet-stream")
     size_bytes = Column(Integer, default=0)
     status = Column(String(20), default="queued", index=True)
-    stage = Column(String(40), default="queued")
+    stage = Column(String(255), default="queued")
     progress = Column(Integer, default=0)
     error = Column(Text, default="")
     page_count = Column(Integer, default=0)
