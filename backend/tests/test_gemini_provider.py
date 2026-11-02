@@ -8,12 +8,16 @@ from google.genai import errors as genai_errors
 
 from app.ai import providers
 from app.ai.providers import (
+    AIConfigError,
     AIRequestError,
     _gemini_chat,
+    _gemini_embedding,
     _gemini_error,
     _gemini_http_options,
     _stream_gemini,
+    validate_ai_config,
 )
+from app.services.settings import build_ai_config
 from tests.conftest import upload_text
 
 
@@ -67,15 +71,30 @@ class FakeAsyncModels:
 
 
 class FakeClient:
-    def __init__(self, text="", chunks=None, error=None, models=None):
+    def __init__(self, text="", chunks=None, error=None, models=None, embeddings=None, embed_error=None):
         self.aio = SimpleNamespace(
             models=FakeAsyncModels(text=text, chunks=chunks, error=error, models=models),
             aclose=self._aclose,
         )
+        self.embeddings = embeddings or []
+        self.embed_error = embed_error
+        self.embed_calls = []
+        self.models = SimpleNamespace(embed_content=self._embed_content)
         self.closed = False
 
     async def _aclose(self):
         self.closed = True
+
+    def close(self):
+        self.closed = True
+
+    def _embed_content(self, **kwargs):
+        self.embed_calls.append(kwargs)
+        if self.embed_error:
+            raise self.embed_error
+        return SimpleNamespace(
+            embeddings=[SimpleNamespace(values=vector) for vector in self.embeddings]
+        )
 
 
 def _patch_client(monkeypatch, client):
@@ -143,8 +162,166 @@ def test_official_sdk_model_list_awaits_async_pager(monkeypatch):
 
     assert result["provider"] == "gemini"
     assert result["models"] == ["gemini-3.5-flash", "gemini-3.8-pro"]
+    assert [item["id"] for item in result["chat_models"]] == ["gemini-3.5-flash", "gemini-3.8-pro"]
+    assert [item["id"] for item in result["embedding_models"]] == ["text-embedding-004"]
     assert fake.aio.models.list_calls == [{"config": providers.genai_types.ListModelsConfig(page_size=200)}]
     assert fake.closed is True
+
+
+def _gemini_catalog(models=None):
+    return models or [
+        ("models/gemini-3.6-flash", ["generateContent"]),
+        ("models/gemini-embedding-2", ["embedContent"]),
+    ]
+
+
+def _candidate(**updates):
+    values = {
+        "ai_provider": "gemini",
+        "ai_api_key": "mock-key-never-sent",
+        "ai_model": "gemini-3.6-flash",
+        "embedding_provider": "remote",
+        "ai_embedding_model": "gemini-embedding-2",
+    }
+    values.update(updates)
+    return build_ai_config(values)
+
+
+def test_gemini_embedding_forces_index_dimension_and_signature(monkeypatch):
+    fake = FakeClient(embeddings=[[0.25] * providers.EMBED_DIM])
+    _patch_client(monkeypatch, fake)
+
+    vectors, signature = _gemini_embedding(
+        _cfg(embedding_model="gemini-embedding-2"),
+        ["Nyquist sampling theorem"],
+    )
+
+    assert len(vectors) == 1
+    assert len(vectors[0]) == providers.EMBED_DIM
+    assert signature == "gemini:gemini-embedding-2"
+    config = fake.embed_calls[0]["config"]
+    assert config.output_dimensionality == providers.EMBED_DIM
+    assert fake.closed is True
+
+
+def test_gemini_embedding_rejects_wrong_dimension(monkeypatch):
+    fake = FakeClient(embeddings=[[0.25] * 3])
+    _patch_client(monkeypatch, fake)
+
+    with pytest.raises(AIRequestError, match="requires 384"):
+        _gemini_embedding(_cfg(embedding_model="gemini-embedding-2"), ["test"])
+
+
+def test_validate_ai_config_accepts_catalogued_gemini_models(monkeypatch):
+    _patch_client(monkeypatch, FakeClient(models=_gemini_catalog()))
+
+    asyncio.run(validate_ai_config(_candidate()))
+
+
+def test_validate_ai_config_rejects_openai_embedding_model_for_gemini(monkeypatch):
+    _patch_client(monkeypatch, FakeClient(models=_gemini_catalog()))
+
+    with pytest.raises(AIConfigError, match="embedding model"):
+        asyncio.run(validate_ai_config(_candidate(ai_embedding_model="text-embedding-3-small")))
+
+
+def test_validate_ai_config_rejects_unavailable_chat_model(monkeypatch):
+    _patch_client(monkeypatch, FakeClient(models=_gemini_catalog()))
+
+    with pytest.raises(AIConfigError, match="generateContent"):
+        asyncio.run(validate_ai_config(_candidate(ai_model="gemini-2.5-flash")))
+
+
+def test_invalid_embedding_model_is_not_saved(client, monkeypatch):
+    client.put("/api/settings", json={"ai_provider": "offline", "embedding_provider": "local"})
+    fake = FakeClient(models=_gemini_catalog())
+    _patch_client(monkeypatch, fake)
+
+    response = client.put(
+        "/api/settings",
+        json={
+            "ai_provider": "gemini",
+            "ai_base_url": "https://generativelanguage.googleapis.com/v1beta",
+            "ai_model": "gemini-3.6-flash",
+            "ai_api_key": "mock-key-never-sent",
+            "embedding_provider": "remote",
+            "ai_embedding_model": "text-embedding-3-small",
+        },
+    )
+
+    assert response.status_code == 400
+    assert "embedding model" in response.text.lower()
+    settings = client.get("/api/settings").json()
+    assert settings["ai_provider"] == "offline"
+    assert settings["effective_embedding_provider"] == "local"
+
+
+def test_ai_test_reports_chat_and_embedding_separately(client, monkeypatch):
+    client.put("/api/settings", json={"ai_provider": "offline", "embedding_provider": "local"})
+    fake = FakeClient(
+        text="ready",
+        models=_gemini_catalog(),
+        embeddings=[[0.2] * providers.EMBED_DIM],
+    )
+    _patch_client(monkeypatch, fake)
+    saved = client.put(
+        "/api/settings",
+        json={
+            "ai_provider": "gemini",
+            "ai_base_url": "https://generativelanguage.googleapis.com/v1beta",
+            "ai_model": "gemini-3.6-flash",
+            "ai_api_key": "mock-key-never-sent",
+            "embedding_provider": "remote",
+            "ai_embedding_model": "gemini-embedding-2",
+        },
+    )
+    assert saved.status_code == 200, saved.text
+
+    result = client.post("/api/ai/test").json()
+
+    assert result["ok"] is True
+    assert result["chat"]["ok"] is True
+    assert result["chat"]["model"] == "gemini-3.6-flash"
+    assert result["embedding"]["ok"] is True
+    assert result["embedding"]["dimensions"] == providers.EMBED_DIM
+    assert result["embedding"]["signature"] == "gemini:gemini-embedding-2"
+    client.put("/api/settings", json={"ai_provider": "offline", "embedding_provider": "local"})
+
+
+def test_retrieval_never_mixes_remote_queries_with_local_chunks(client, subject, monkeypatch):
+    text = "Aliasing occurs when the sampling rate is below the Nyquist rate. [S1]"
+    upload_text(client, subject["id"], "mismatch-notes.txt", text)
+    client.put("/api/settings", json={"ai_provider": "offline", "embedding_provider": "local"})
+
+    fake = FakeClient(
+        models=_gemini_catalog(),
+        embeddings=[providers.local_embedding(text)],
+    )
+    _patch_client(monkeypatch, fake)
+    saved = client.put(
+        "/api/settings",
+        json={
+            "ai_provider": "gemini",
+            "ai_base_url": "https://generativelanguage.googleapis.com/v1beta",
+            "ai_model": "gemini-3.6-flash",
+            "ai_api_key": "mock-key-never-sent",
+            "embedding_provider": "remote",
+            "ai_embedding_model": "gemini-embedding-2",
+        },
+    )
+    assert saved.status_code == 200, saved.text
+
+    result = client.post(
+        "/api/documents/search",
+        json={"query": text, "subject_id": subject["id"]},
+    ).json()
+
+    assert result["mode"] == "gemini:gemini-embedding-2"
+    assert result["stale_chunks"] >= 1
+    assert result["sources"]
+    assert max(source["score"] for source in result["sources"]) < 0.6
+    assert "different embedding" in result["note"]
+    client.put("/api/settings", json={"ai_provider": "offline", "embedding_provider": "local"})
 
 
 def test_aq_google_api_keys_are_redacted():
@@ -222,6 +399,11 @@ def test_chat_endpoint_uses_official_sdk_and_preserves_citations(client, subject
         "The Nyquist rate is twice the highest signal frequency. [S1]",
     )
     try:
+        fake = FakeClient(
+            text="The Nyquist rate is twice the maximum frequency [S1].",
+            models=[("models/gemini-3.5-flash", ["generateContent"])],
+        )
+        _patch_client(monkeypatch, fake)
         saved = client.put(
             "/api/settings",
             json={
@@ -234,8 +416,6 @@ def test_chat_endpoint_uses_official_sdk_and_preserves_citations(client, subject
             },
         )
         assert saved.status_code == 200, saved.text
-        fake = FakeClient(text="The Nyquist rate is twice the maximum frequency [S1].")
-        _patch_client(monkeypatch, fake)
 
         response = client.post(
             "/api/ai/chat",
@@ -274,6 +454,11 @@ def test_streaming_endpoint_emits_cited_sources(client, subject, monkeypatch):
         "Aliasing occurs when the sampling rate is below the Nyquist rate. [S1]",
     )
     try:
+        fake = FakeClient(
+            chunks=["Aliasing occurs below ", "the Nyquist rate [S1]."],
+            models=[("models/gemini-3.5-flash", ["generateContent"])],
+        )
+        _patch_client(monkeypatch, fake)
         saved = client.put(
             "/api/settings",
             json={
@@ -284,10 +469,6 @@ def test_streaming_endpoint_emits_cited_sources(client, subject, monkeypatch):
             },
         )
         assert saved.status_code == 200, saved.text
-        _patch_client(
-            monkeypatch,
-            FakeClient(chunks=["Aliasing occurs below ", "the Nyquist rate [S1]."]),
-        )
 
         response = client.post(
             "/api/ai/chat/stream",

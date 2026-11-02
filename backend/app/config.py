@@ -99,6 +99,7 @@ ALLOWED_DOCUMENT_EXTENSIONS = {
     ".pdf", ".docx", ".pptx", ".txt", ".md", ".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff"
 }
 MAX_UPLOAD_MB = int(os.environ.get("AEC_MAX_UPLOAD_MB", "80"))
+EMBEDDING_DIMENSIONS = 384
 
 DEFAULT_SETTINGS = {
     "ai_provider": "offline",

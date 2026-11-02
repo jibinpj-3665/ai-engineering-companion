@@ -6,17 +6,37 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from ..config import ENV_KEYS_ONLY
+from ..ai.providers import AIError, validate_ai_config
+from ..config import ENV_KEYS_ONLY, SECRET_SETTING_KEYS
 from ..database import SessionLocal, current_user_id, get_db, reset_current_user, set_current_user
 from ..models import Notification
 from ..serializers import notification_dict
 from ..services.backup import MAX_RESTORE_BYTES, export_user_backup, restore_user_backup
 from ..services.documents import reindex_subject_documents
-from ..services.settings import get_ai_config, public_settings, update_settings
+from ..services.settings import (
+    build_ai_config,
+    embedding_index_status,
+    get_ai_config,
+    get_settings,
+    normalize_embedding_mode,
+    normalize_provider,
+    public_settings,
+    update_settings,
+)
 
 router = APIRouter(tags=["settings"])
 
 PROVIDERS = {"offline", "openai", "gemini", "groq", "custom", "local", "openai_compatible", "ollama", "google"}
+AI_UPDATE_KEYS = {
+    "ai_provider",
+    "ai_base_url",
+    "ai_api_key",
+    "ai_model",
+    "ai_embedding_model",
+    "embedding_provider",
+    "local_base_url",
+    "local_model",
+}
 
 
 class SettingsUpdate(BaseModel):
@@ -39,15 +59,37 @@ class SettingsUpdate(BaseModel):
     onboarding_complete: str | None = None
 
 
+def _candidate_config(db: Session, updates: dict) -> dict:
+    values = get_settings(db)
+    for key, value in updates.items():
+        if value is None:
+            continue
+        if key in SECRET_SETTING_KEYS and isinstance(value, str) and set(value.strip()) == {"*"}:
+            continue
+        values[key] = value
+    values["ai_provider"] = normalize_provider(str(values.get("ai_provider", "offline")))
+    values["embedding_provider"] = normalize_embedding_mode(str(values.get("embedding_provider", "local")))
+    return build_ai_config(values)
+
+
 def _settings_response(db: Session) -> dict:
     data = public_settings(db)
     cfg = get_ai_config(db)
+    index = embedding_index_status(db, cfg)
     data["ai_configured"] = cfg["configured"]
     data["effective_base_url"] = cfg["base_url"]
     data["effective_model"] = cfg["model"]
     data["key_source"] = cfg["key_source"]
     data["env_key_set"] = cfg["env_key_set"]
     data["env_keys_only"] = ENV_KEYS_ONLY
+    data["effective_embedding_mode"] = cfg["embedding_mode"]
+    data["effective_embedding_provider"] = cfg["embedding_provider"]
+    data["effective_embedding_model"] = cfg["embedding_model"]
+    data["embedding_configured"] = cfg["embedding_configured"]
+    data["embedding_dimensions"] = cfg["embedding_dimensions"]
+    data["embedding_signature"] = cfg["embedding_signature"]
+    data["embedding_index"] = index
+    data["needs_reindex"] = index["needs_reindex"]
     return data
 
 
@@ -57,7 +99,7 @@ def get_settings_route(db: Session = Depends(get_db)):
 
 
 @router.put("/settings")
-def put_settings(payload: SettingsUpdate, db: Session = Depends(get_db)):
+async def put_settings(payload: SettingsUpdate, db: Session = Depends(get_db)):
     updates = payload.model_dump(exclude_none=True)
     if "ai_provider" in updates and updates["ai_provider"] not in PROVIDERS:
         raise HTTPException(status_code=400, detail="Unsupported AI provider")
@@ -88,6 +130,12 @@ def put_settings(payload: SettingsUpdate, db: Session = Depends(get_db)):
             raise HTTPException(status_code=400, detail="Max tokens must be a number") from exc
         if tokens < 128 or tokens > 32000:
             raise HTTPException(status_code=400, detail="Max tokens must be between 128 and 32000")
+    if AI_UPDATE_KEYS & updates.keys():
+        candidate = _candidate_config(db, updates)
+        try:
+            await validate_ai_config(candidate)
+        except AIError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     update_settings(db, updates)
     return _settings_response(db)
 

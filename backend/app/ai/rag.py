@@ -1,13 +1,18 @@
 import json
-import math
 import re
 from typing import List, Optional
 
 from sqlalchemy.orm import Session
 
 from ..models import Document, DocumentChunk
-from ..services.settings import get_ai_config
-from .providers import EMBED_DIM, embed_texts_sync, local_embedding
+from ..services.settings import LOCAL_EMBEDDING_MODEL, get_ai_config
+from .providers import (
+    AIError,
+    EMBED_DIM,
+    embed_texts_sync,
+    embedding_signature_matches,
+    local_embedding,
+)
 
 _WORD_RE = re.compile(r"[a-zA-Z0-9]+")
 _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+")
@@ -76,13 +81,26 @@ def retrieve(db: Session, query: str, subject_id: Optional[int] = None, top_k: i
     if not query:
         return {"sources": [], "context": "", "mode": "local", "note": "Empty query."}
 
-    qvec = local_embedding(query)
-    remote_qvec = None
     cfg = get_ai_config(db)
-    if cfg.get("embedding_provider") not in {None, "", "local"} and cfg.get("configured"):
-        vectors, _provider = embed_texts_sync(db, [query], task_type="RETRIEVAL_QUERY")
-        if vectors:
-            remote_qvec = vectors[0]
+    active_signature = cfg.get("embedding_signature") or LOCAL_EMBEDDING_MODEL
+    qvec = None
+    remote_qvec = None
+    mode = "local"
+    notes: List[str] = []
+    if active_signature == LOCAL_EMBEDDING_MODEL:
+        qvec = local_embedding(query)
+    elif cfg.get("configured") and cfg.get("embedding_configured"):
+        try:
+            vectors, signature = embed_texts_sync(db, [query], task_type="RETRIEVAL_QUERY")
+            if vectors and embedding_signature_matches(signature, active_signature):
+                remote_qvec = vectors[0]
+                mode = signature
+            else:
+                notes.append("The remote embedding response did not match the saved embedding configuration.")
+        except AIError as exc:
+            notes.append(f"Remote embedding failed; keyword-only retrieval was used. {exc}")
+    else:
+        notes.append("Remote embeddings are not configured; keyword-only retrieval was used.")
 
     qkeywords = _keywords(query)
     rows_query = db.query(DocumentChunk, Document).join(Document, DocumentChunk.document_id == Document.id)
@@ -93,14 +111,26 @@ def retrieve(db: Session, query: str, subject_id: Optional[int] = None, top_k: i
     rows = rows_query.filter(Document.status == "ready", Document.active == True).limit(6000).all()  # noqa: E712
 
     scored = []
+    stale_chunks = 0
     for chunk, document in rows:
         try:
             vec = json.loads(chunk.embedding or "[]")
         except ValueError:
             vec = []
-        if remote_qvec is not None and len(vec) == len(remote_qvec):
+        signature_matches = embedding_signature_matches(chunk.embed_provider, active_signature)
+        if not signature_matches:
+            stale_chunks += 1
+        if (
+            remote_qvec is not None
+            and signature_matches
+            and len(vec) == len(remote_qvec)
+        ):
             cosine = _cosine(remote_qvec, vec)
-        elif len(vec) == EMBED_DIM:
+        elif (
+            qvec is not None
+            and signature_matches
+            and len(vec) == EMBED_DIM
+        ):
             cosine = _cosine(qvec, vec)
         else:
             cosine = 0.0
@@ -134,11 +164,20 @@ def retrieve(db: Session, query: str, subject_id: Optional[int] = None, top_k: i
             + (f", section: {chunk.heading}" if chunk.heading else "")
             + f"\n{snippet}"
         )
+    if stale_chunks:
+        notes.append(
+            f"{stale_chunks} indexed section(s) use a different embedding model/provider and were not used "
+            "for vector similarity. Re-index documents to enable semantic search with the current embeddings."
+        )
+    if not sources:
+        notes.append("No indexed study material matched this query.")
     return {
         "sources": sources,
         "context": "\n\n".join(context_parts),
-        "mode": "local",
-        "note": "" if sources else "No indexed study material matched this query.",
+        "mode": mode,
+        "embedding_signature": active_signature,
+        "stale_chunks": stale_chunks,
+        "note": " ".join(notes),
     }
 
 

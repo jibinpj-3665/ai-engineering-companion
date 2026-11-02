@@ -1,5 +1,6 @@
 import type {
   AIStatus,
+  AITestResult,
   AIUsageResponse,
   AnalyticsData,
   AuthStatus,
@@ -20,6 +21,7 @@ import type {
   Flashcard,
   LabDetail,
   LabSummary,
+  ModelDiscoveryInput,
   ModelList,
   Notification,
   PhaseInfo,
@@ -148,9 +150,9 @@ export const api = {
   libraryManifestUrl: () => `${BASE}/api/syllabus/library/manifest`,
 
   aiStatus: () => request<AIStatus>("/ai/status"),
-  testAI: () => request<{ ok: boolean; provider: string; message: string }>("/ai/test", { method: "POST" }),
+  testAI: () => request<AITestResult>("/ai/test", { method: "POST" }),
   aiProviders: () => request<ProviderList>("/ai/providers"),
-  aiModels: () => request<ModelList>("/ai/models", { method: "POST" }),
+  aiModels: (body?: ModelDiscoveryInput) => request<ModelList>("/ai/models", json(body || {})),
   aiUsage: (limit = 30) => request<AIUsageResponse>(`/ai/usage?limit=${limit}`),
   evaluateAnswer: (body: { question: string; answer: string; subject_id?: number; topic_id?: number }) =>
     request<EvaluationResult>("/ai/evaluate", json(body)),

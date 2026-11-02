@@ -167,8 +167,9 @@ def reprocess_document(document_id: int, background: BackgroundTasks, db: Sessio
 def search_documents(payload: SearchRequest, db: Session = Depends(get_db)):
     top_k = max(1, min(payload.top_k, 20))
     result = retrieve(db, payload.query, subject_id=payload.subject_id, top_k=top_k)
-    result["note"] = (
-        "Retrieval combines local feature-hashed vectors with keyword overlap. "
-        "Configure a remote embedding provider in Settings for dense semantic embeddings."
-    )
+    if not result.get("note"):
+        result["note"] = (
+            "Retrieval combines the active embedding index with keyword overlap. "
+            "Changing the embedding model requires re-indexing."
+        )
     return result

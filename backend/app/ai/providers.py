@@ -13,15 +13,21 @@ from google.genai import errors as genai_errors
 from google.genai import types as genai_types
 from sqlalchemy.orm import Session
 
+from ..config import EMBEDDING_DIMENSIONS
 from ..database import SessionLocal
 from ..models import AIUsageLog
-from ..services.settings import get_ai_config
+from ..services.settings import (
+    LOCAL_EMBEDDING_MODEL,
+    REMOTE_EMBEDDING_PROVIDERS,
+    embedding_signature,
+    get_ai_config,
+)
 
-EMBED_DIM = 384
+EMBED_DIM = EMBEDDING_DIMENSIONS
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 TIMEOUT = httpx.Timeout(120.0, connect=15.0)
 GEMINI_TIMEOUT_MS = 120_000
-GEMINI_EMBED_DEFAULT = "text-embedding-004"
+GEMINI_EMBED_DEFAULT = "gemini-embedding-2"
 GEMINI_DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com"
 _GEMINI_VERSION_RE = re.compile(r"^v\d+(?:alpha|beta)?\d*$")
 _SECRET_PATTERNS = (
@@ -63,6 +69,28 @@ def local_embedding(text: str) -> List[float]:
     if norm == 0:
         return vector
     return [v / norm for v in vector]
+
+
+def _normalized_signature(value: object) -> str:
+    signature = str(value or "").strip()
+    if signature in {"", "local", LOCAL_EMBEDDING_MODEL}:
+        return LOCAL_EMBEDDING_MODEL
+    return signature
+
+
+def embedding_signature_matches(stored: object, active: object) -> bool:
+    return _normalized_signature(stored) == _normalized_signature(active)
+
+
+def _validate_base_url(cfg: dict) -> None:
+    raw = (cfg.get("base_url") or "").strip()
+    if not raw:
+        raise AIConfigError("An endpoint URL is required for the selected provider.")
+    parsed = urlparse(raw)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise AIConfigError("The provider endpoint must be a valid http(s) URL.")
+    if parsed.username or parsed.password:
+        raise AIConfigError("The provider endpoint must not contain embedded credentials.")
 
 
 def _auth_headers(cfg: dict) -> dict:
@@ -476,6 +504,22 @@ async def stream_chat_completion(
         raise
 
 
+def _validate_embedding_vectors(
+    vectors: Sequence[Sequence[float]], expected_count: int, provider: str
+) -> List[List[float]]:
+    output = [list(vector or []) for vector in vectors]
+    if len(output) != expected_count or any(not vector for vector in output):
+        raise AIRequestError(f"{provider} embeddings returned a mismatched vector count.")
+    dimensions = {len(vector) for vector in output}
+    if dimensions != {EMBED_DIM}:
+        found = ", ".join(str(value) for value in sorted(dimensions)) or "none"
+        raise AIRequestError(
+            f"{provider} embeddings returned {found} dimensions; this index requires {EMBED_DIM}. "
+            "Use a model/configuration that returns the required dimension, then re-index."
+        )
+    return output
+
+
 def _gemini_embedding(
     cfg: dict, texts: Sequence[str], task_type: str = "RETRIEVAL_DOCUMENT"
 ) -> tuple[List[List[float]], str]:
@@ -484,13 +528,17 @@ def _gemini_embedding(
     try:
         response = client.models.embed_content(
             model=model,
-            contents=list(texts),
-            config=genai_types.EmbedContentConfig(task_type=task_type),
+            contents=[
+                genai_types.Content(parts=[genai_types.Part.from_text(text=text)])
+                for text in texts
+            ],
+            config=genai_types.EmbedContentConfig(
+                task_type=task_type,
+                output_dimensionality=EMBED_DIM,
+            ),
         )
         vectors = [list(item.values or []) for item in (response.embeddings or [])]
-        if len(vectors) != len(texts) or any(not vector for vector in vectors):
-            raise AIRequestError("Gemini embeddings returned a mismatched vector count.")
-        return vectors, f"gemini:{model}"
+        return _validate_embedding_vectors(vectors, len(texts), "Gemini"), embedding_signature("gemini", model)
     except AIError:
         raise
     except Exception as exc:
@@ -503,7 +551,10 @@ def _gemini_embedding(
 
 
 def _openai_embeddings(cfg: dict, texts: Sequence[str]) -> tuple[List[List[float]], str]:
-    payload = {"model": cfg["embedding_model"] or "text-embedding-3-small", "input": list(texts)}
+    model = cfg["embedding_model"] or "text-embedding-3-small"
+    payload = {"model": model, "input": list(texts)}
+    if model.startswith("text-embedding-3"):
+        payload["dimensions"] = EMBED_DIM
     try:
         with httpx.Client(timeout=TIMEOUT) as client:
             response = client.post(_openai_url(cfg, "/embeddings"), json=payload, headers=_auth_headers(cfg))
@@ -518,18 +569,33 @@ def _openai_embeddings(cfg: dict, texts: Sequence[str]) -> tuple[List[List[float
         vectors = [item["embedding"] for item in data["data"]]
     except (KeyError, TypeError, ValueError) as exc:
         raise AIRequestError("Embedding endpoint returned an unexpected response.") from exc
-    if len(vectors) != len(texts):
-        raise AIRequestError("Embedding provider returned a mismatched vector count.")
-    return vectors, f"remote:{payload['model']}"
+    provider = cfg.get("embedding_provider") or cfg.get("provider") or "openai"
+    return _validate_embedding_vectors(vectors, len(texts), "Embedding provider"), embedding_signature(provider, model)
 
 
-async def embed_texts(
+def _embedding_config(cfg: dict) -> tuple[str, str]:
+    provider = cfg.get("embedding_provider") or "local"
+    model = cfg.get("embedding_model") or ""
+    if provider == "local" or not cfg.get("configured"):
+        return "local", LOCAL_EMBEDDING_MODEL
+    if provider not in REMOTE_EMBEDDING_PROVIDERS:
+        raise AIConfigError(
+            "The selected provider does not support remote embeddings. Use local embeddings or choose "
+            "Gemini/OpenAI-compatible embeddings."
+        )
+    if not cfg.get("embedding_configured"):
+        raise AIConfigError("Embedding settings are incomplete. Select a supported embedding model and provider.")
+    return provider, model
+
+
+def embed_texts(
     db: Session, texts: Sequence[str], task_type: str = "RETRIEVAL_DOCUMENT"
 ) -> tuple[List[List[float]], str]:
     cfg = get_ai_config(db)
-    if cfg["embedding_provider"] == "local" or not cfg["configured"]:
-        return [local_embedding(text) for text in texts], "local-hash-v1"
-    if cfg["provider"] == "gemini":
+    provider, _model = _embedding_config(cfg)
+    if provider == "local":
+        return [local_embedding(text) for text in texts], LOCAL_EMBEDDING_MODEL
+    if provider == "gemini":
         return _gemini_embedding(cfg, texts, task_type)
     return _openai_embeddings(cfg, texts)
 
@@ -538,33 +604,51 @@ def embed_texts_sync(
     db: Session, texts: Sequence[str], task_type: str = "RETRIEVAL_DOCUMENT"
 ) -> tuple[List[List[float]], str]:
     cfg = get_ai_config(db)
-    if cfg["embedding_provider"] == "local" or not cfg["configured"]:
-        return [local_embedding(text) for text in texts], "local-hash-v1"
-    if cfg["provider"] == "gemini":
+    provider, _model = _embedding_config(cfg)
+    if provider == "local":
+        return [local_embedding(text) for text in texts], LOCAL_EMBEDDING_MODEL
+    if provider == "gemini":
         return _gemini_embedding(cfg, texts, task_type)
     return _openai_embeddings(cfg, texts)
 
 
-async def list_models(db: Session) -> dict:
-    cfg = get_ai_config(db)
+def _model_info(item: object) -> dict:
+    name = (getattr(item, "name", "") or "").split("/")[-1]
+    return {
+        "id": name,
+        "display_name": getattr(item, "display_name", "") or name,
+        "input_token_limit": getattr(item, "input_token_limit", None),
+        "output_token_limit": getattr(item, "output_token_limit", None),
+    }
+
+
+async def list_models_for_config(cfg: dict) -> dict:
     if cfg["provider"] == "offline":
-        return {"provider": "offline", "models": [], "message": "Offline mode has no remote models."}
-    if not cfg["base_url"]:
-        raise AIConfigError("Set the provider endpoint before loading models.")
-    if cfg["provider"] in {"openai", "groq", "custom", "local"} and not cfg["api_key"] and cfg["provider"] not in {"local", "custom"}:
+        return {
+            "provider": "offline",
+            "models": [],
+            "chat_models": [],
+            "embedding_models": [],
+            "message": "Offline mode has no remote models.",
+        }
+    _validate_base_url(cfg)
+    if cfg["provider"] in {"openai", "groq"} and not cfg["api_key"]:
         raise AIConfigError("Add an API key or configure it on the server before loading models.")
-    models: List[str] = []
+    chat_models: dict[str, dict] = {}
+    embedding_models: dict[str, dict] = {}
     if cfg["provider"] == "gemini":
         client = _gemini_client(cfg)
         try:
             pager = await client.aio.models.list(config=genai_types.ListModelsConfig(page_size=200))
             async for item in pager:
-                actions = item.supported_actions or []
-                if actions and "generateContent" not in actions:
+                info = _model_info(item)
+                if not info["id"]:
                     continue
-                name = (item.name or "").split("/")[-1]
-                if name:
-                    models.append(name)
+                actions = getattr(item, "supported_actions", None) or []
+                if "generateContent" in actions or not actions:
+                    chat_models[info["id"]] = info
+                if "embedContent" in actions:
+                    embedding_models[info["id"]] = info
         except AIError:
             raise
         except Exception as exc:
@@ -587,24 +671,83 @@ async def list_models(db: Session) -> dict:
         except ValueError as exc:
             raise AIRequestError("Provider returned an unexpected model list.") from exc
         for item in data.get("data", []):
-            name = item.get("id")
-            if name:
-                models.append(name)
-    return {"provider": cfg["provider"], "models": sorted(set(models)), "message": ""}
+            name = str(item.get("id") or "").strip()
+            if not name:
+                continue
+            info = {"id": name, "display_name": name, "input_token_limit": None, "output_token_limit": None}
+            if "embed" in name.lower() or "embedding" in name.lower():
+                embedding_models[name] = info
+            else:
+                chat_models[name] = info
+    chat = [chat_models[key] for key in sorted(chat_models)]
+    embeddings = [embedding_models[key] for key in sorted(embedding_models)]
+    message = ""
+    if not chat:
+        message = "The provider did not report any chat models."
+    elif cfg.get("embedding_mode", "local") == "remote" and not embeddings:
+        message = "The provider did not report any embedding models."
+    return {
+        "provider": cfg["provider"],
+        "models": [item["id"] for item in chat],
+        "chat_models": chat,
+        "embedding_models": embeddings,
+        "message": message,
+    }
 
 
-async def test_connection(db: Session) -> dict:
-    cfg = get_ai_config(db)
+async def list_models(db: Session) -> dict:
+    return await list_models_for_config(get_ai_config(db))
+
+
+async def validate_ai_config(cfg: dict) -> None:
+    if cfg["provider"] == "offline":
+        return
+    _validate_base_url(cfg)
+    if not cfg.get("model"):
+        raise AIConfigError("A model ID is required for the selected provider.")
+    if cfg["provider"] in {"gemini", "openai", "groq"}:
+        if not cfg["configured"]:
+            raise AIConfigError("The provider configuration is incomplete. Add the API key and required fields.")
+        catalog = await list_models_for_config(cfg)
+        chat_ids = {item["id"] for item in catalog["chat_models"]}
+        if cfg["model"] not in chat_ids:
+            raise AIConfigError(
+                f'The model "{cfg["model"]}" is not available for generateContent with {cfg["provider"]}. '
+                "Load the provider model list and select an exact available model ID."
+            )
+    if cfg["embedding_mode"] == "remote":
+        if cfg["embedding_provider"] == "unsupported":
+            raise AIConfigError(
+                f"{cfg['provider']} does not expose a supported remote embedding endpoint. "
+                "Use local embeddings or select a different chat provider."
+            )
+        if not cfg.get("embedding_configured"):
+            raise AIConfigError("Remote embedding settings are incomplete. Select an exact embedding model.")
+        if cfg["embedding_provider"] != cfg["provider"]:
+            raise AIConfigError(
+                "Remote embeddings must use the same provider as the chat model. "
+                "Use local embeddings or select the matching provider."
+            )
+        if cfg["provider"] in {"gemini", "openai"}:
+            embedding_ids = {item["id"] for item in catalog["embedding_models"]}
+            if cfg["embedding_model"] not in embedding_ids:
+                raise AIConfigError(
+                    f'The embedding model "{cfg["embedding_model"]}" is not available for embedContent with '
+                    f'{cfg["provider"]}. Load the provider model list and select an exact embedding model ID.'
+                )
+    elif cfg["embedding_provider"] != "local":
+        raise AIConfigError("Local embedding mode must use local feature hashing.")
+
+
+async def _chat_test(db: Session, cfg: dict) -> dict:
     if cfg["provider"] == "offline":
         return {
             "ok": True,
+            "skipped": True,
             "provider": "offline",
-            "message": "Offline retrieval mode is active. Local document, planning and revision features work without a network.",
+            "model": "",
+            "message": "Offline retrieval mode has no remote chat model to test.",
         }
-    if not cfg["base_url"] or not cfg["model"]:
-        return {"ok": False, "provider": cfg["provider"], "message": "Endpoint URL and model name are required."}
-    if not cfg["api_key"] and cfg["provider"] not in {"local", "custom"}:
-        return {"ok": False, "provider": cfg["provider"], "message": "API key is required for this provider."}
     try:
         answer = await chat_completion(
             db,
@@ -613,6 +756,88 @@ async def test_connection(db: Session) -> dict:
             temperature=0,
             operation="connection_test",
         )
-        return {"ok": True, "provider": cfg["provider"], "message": f"Connection successful. Model replied: {answer.strip()[:60]}"}
+        return {
+            "ok": True,
+            "provider": cfg["provider"],
+            "model": cfg["model"],
+            "message": f"Chat connection succeeded. Model replied: {answer.strip()[:60]}",
+        }
     except AIError as exc:
-        return {"ok": False, "provider": cfg["provider"], "message": str(exc)}
+        return {
+            "ok": False,
+            "provider": cfg["provider"],
+            "model": cfg["model"],
+            "message": str(exc),
+        }
+
+
+def _embedding_test(db: Session, cfg: dict) -> dict:
+    if not cfg.get("embedding_configured"):
+        return {
+            "ok": False,
+            "provider": cfg.get("embedding_provider", ""),
+            "model": cfg.get("embedding_model", ""),
+            "dimensions": 0,
+            "message": "Embedding settings are incomplete.",
+        }
+    try:
+        vectors, signature = embed_texts_sync(db, ["embedding connectivity test"], task_type="RETRIEVAL_QUERY")
+        dimensions = len(vectors[0]) if vectors else 0
+        if dimensions != EMBED_DIM:
+            return {
+                "ok": False,
+                "provider": signature.split(":", 1)[0],
+                "model": cfg.get("embedding_model", ""),
+                "signature": signature,
+                "dimensions": dimensions,
+                "message": f"Embedding test returned {dimensions} dimensions; expected {EMBED_DIM}.",
+            }
+        if not embedding_signature_matches(signature, cfg.get("embedding_signature")):
+            return {
+                "ok": False,
+                "provider": signature.split(":", 1)[0],
+                "model": cfg.get("embedding_model", ""),
+                "signature": signature,
+                "dimensions": dimensions,
+                "message": "Embedding test returned a different provider/model signature than the saved config.",
+            }
+        return {
+            "ok": True,
+            "provider": cfg.get("embedding_provider", ""),
+            "model": cfg.get("embedding_model", ""),
+            "signature": signature,
+            "dimensions": dimensions,
+            "message": f"Embedding test succeeded with {dimensions} dimensions ({signature}).",
+        }
+    except AIError as exc:
+        return {
+            "ok": False,
+            "provider": cfg.get("embedding_provider", ""),
+            "model": cfg.get("embedding_model", ""),
+            "dimensions": 0,
+            "message": str(exc),
+        }
+
+
+async def test_connection(db: Session) -> dict:
+    cfg = get_ai_config(db)
+    chat = await _chat_test(db, cfg)
+    embedding = _embedding_test(db, cfg)
+    ok = bool(chat.get("ok")) and bool(embedding.get("ok"))
+    if ok:
+        message = (
+            f"Chat and embedding tests succeeded for {cfg['provider']}."
+            if cfg["provider"] != "offline"
+            else "Offline mode is active; local embeddings are available."
+        )
+    else:
+        failures = [part["message"] for part in (chat, embedding) if not part.get("ok")]
+        message = " ".join(failures) or "AI validation failed."
+    return {
+        "ok": ok,
+        "provider": cfg["provider"],
+        "model": cfg["model"],
+        "message": message,
+        "chat": chat,
+        "embedding": embedding,
+    }

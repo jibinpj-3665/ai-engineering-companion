@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import {
+  AlertTriangle,
   Brain,
   CheckCircle2,
   Database,
@@ -20,7 +21,13 @@ import {
   Zap,
 } from "lucide-react";
 import { api, ApiError } from "../lib/api";
-import type { AIUsageResponse, ProviderPreset, Settings as SettingsType } from "../lib/types";
+import type {
+  AITestResult,
+  AIUsageResponse,
+  ModelList,
+  ProviderPreset,
+  Settings as SettingsType,
+} from "../lib/types";
 import { useApp } from "../contexts/AppContext";
 import { useToast } from "../components/ui/Toast";
 import { PageHeader } from "../components/PageHeader";
@@ -56,11 +63,13 @@ export default function Settings() {
   const [apiKey, setApiKey] = useState("");
   const [showKey, setShowKey] = useState(false);
   const [providers, setProviders] = useState<ProviderPreset[]>([]);
-  const [models, setModels] = useState<string[]>([]);
+  const [models, setModels] = useState<ModelList | null>(null);
   const [usage, setUsage] = useState<AIUsageResponse | null>(null);
   const [savingAI, setSavingAI] = useState(false);
   const [savingProfile, setSavingProfile] = useState(false);
+  const [loadingModels, setLoadingModels] = useState(false);
   const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<AITestResult | null>(null);
   const [restoring, setRestoring] = useState(false);
   const [reindexing, setReindexing] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -78,6 +87,7 @@ export default function Settings() {
 
   const applyProvider = (id: string) => {
     const preset = providers.find((item) => item.id === id);
+    const supportsRemote = preset?.supports_remote_embeddings ?? !["offline", "groq"].includes(id);
     setForm((current) => {
       if (!current) return current;
       const next = { ...current, ai_provider: id };
@@ -90,19 +100,40 @@ export default function Settings() {
           next.ai_model = preset.model;
         }
       }
+      if (!supportsRemote) {
+        next.embedding_provider = "local";
+      } else if (current.embedding_provider === "remote" && preset?.embedding_model) {
+        next.ai_embedding_model = preset.embedding_model;
+      }
       return next;
     });
-    setModels([]);
+    setModels(null);
+    setTestResult(null);
   };
 
   const fetchModels = async () => {
+    setLoadingModels(true);
     try {
-      const list = await api.aiModels();
-      setModels(list.models);
-      if (list.models.length === 0) toast("No models returned", list.message || "The provider did not list any models.", "warning");
-      else toast("Models loaded", `${list.models.length} model${list.models.length > 1 ? "s" : ""} available from ${list.provider}.`, "success");
+      const list = await api.aiModels({
+        provider: form.ai_provider,
+        base_url: form.ai_provider === "local" ? form.local_base_url : form.ai_base_url,
+        api_key: apiKey.trim() || undefined,
+        embedding_provider: form.embedding_provider,
+      });
+      setModels(list);
+      if (list.chat_models.length === 0 && list.embedding_models.length === 0) {
+        toast("No models returned", list.message || "The provider did not list any models.", "warning");
+      } else {
+        toast(
+          "Models loaded",
+          `${list.chat_models.length} chat and ${list.embedding_models.length} embedding model${list.embedding_models.length === 1 ? "" : "s"} returned by ${list.provider}.`,
+          "success",
+        );
+      }
     } catch (error) {
       toast("Could not load models", error instanceof ApiError ? error.message : "Unexpected error", "error");
+    } finally {
+      setLoadingModels(false);
     }
   };
 
@@ -145,10 +176,17 @@ export default function Settings() {
       setSettings(updated);
       setApiKey("");
       setForm(updated);
+      setTestResult(null);
       await refreshAIStatus();
       api.aiProviders().then((data) => setProviders(data.providers)).catch(() => undefined);
       api.aiUsage(20).then(setUsage).catch(() => undefined);
-      toast("AI settings saved", updated.ai_configured ? "Provider configuration is complete." : "Saved. Add the missing fields to activate the provider.", "success");
+      toast(
+        "AI settings saved",
+        updated.ai_configured
+          ? "Configuration validated. Run the chat and embedding tests to verify the provider."
+          : "Saved. Add the missing fields to activate the provider.",
+        "success",
+      );
       if (thenTest) await testConnection();
     } catch (error) {
       toast("Could not save AI settings", error instanceof ApiError ? error.message : "Unexpected error", "error");
@@ -161,9 +199,11 @@ export default function Settings() {
     setTesting(true);
     try {
       const result = await api.testAI();
-      toast(result.ok ? "Connection successful" : "Connection check failed", result.message, result.ok ? "success" : "error");
+      setTestResult(result);
+      toast(result.ok ? "AI tests passed" : "AI tests need attention", result.message, result.ok ? "success" : "error");
     } catch (error) {
-      toast("Connection check failed", error instanceof ApiError ? error.message : "Unexpected error", "error");
+      setTestResult(null);
+      toast("AI tests failed", error instanceof ApiError ? error.message : "Unexpected error", "error");
     } finally {
       setTesting(false);
     }
@@ -198,16 +238,35 @@ export default function Settings() {
 
   const provider = form.ai_provider;
   const usesRemote = provider !== "offline";
-  const providerOptions = providers.length ? providers : [
-    { id: "offline", label: "Offline retrieval only", base_url: "", model: "", requires_key: false, note: "", env_key_set: false, selected: provider === "offline" },
-    { id: "openai", label: "OpenAI", base_url: "https://api.openai.com/v1", model: "gpt-4o-mini", requires_key: true, note: "", env_key_set: false, selected: provider === "openai" },
-    { id: "gemini", label: "Google Gemini", base_url: "https://generativelanguage.googleapis.com/v1beta", model: "gemini-3.5-flash", requires_key: true, note: "", env_key_set: false, selected: provider === "gemini" },
-    { id: "groq", label: "Groq", base_url: "https://api.groq.com/openai/v1", model: "llama-3.3-70b-versatile", requires_key: true, note: "", env_key_set: false, selected: provider === "groq" },
-    { id: "local", label: "Ollama / local server", base_url: "http://127.0.0.1:11434/v1", model: "llama3.1", requires_key: false, note: "", env_key_set: false, selected: provider === "local" },
-    { id: "custom", label: "Custom OpenAI-compatible", base_url: "", model: "", requires_key: false, note: "", env_key_set: false, selected: provider === "custom" },
+  const providerOptions: ProviderPreset[] = providers.length ? providers : [
+    { id: "offline", label: "Offline retrieval only", base_url: "", model: "", embedding_model: "", supports_remote_embeddings: false, requires_key: false, note: "", env_key_set: false, selected: provider === "offline" },
+    { id: "openai", label: "OpenAI", base_url: "https://api.openai.com/v1", model: "gpt-4o-mini", embedding_model: "text-embedding-3-small", supports_remote_embeddings: true, requires_key: true, note: "", env_key_set: false, selected: provider === "openai" },
+    { id: "gemini", label: "Google Gemini", base_url: "https://generativelanguage.googleapis.com/v1beta", model: "gemini-3.6-flash", embedding_model: "gemini-embedding-2", supports_remote_embeddings: true, requires_key: true, note: "", env_key_set: false, selected: provider === "gemini" },
+    { id: "groq", label: "Groq", base_url: "https://api.groq.com/openai/v1", model: "llama-3.3-70b-versatile", embedding_model: "", supports_remote_embeddings: false, requires_key: true, note: "", env_key_set: false, selected: provider === "groq" },
+    { id: "local", label: "Ollama / local server", base_url: "http://127.0.0.1:11434/v1", model: "llama3.1", embedding_model: "text-embedding-3-small", supports_remote_embeddings: true, requires_key: false, note: "", env_key_set: false, selected: provider === "local" },
+    { id: "custom", label: "Custom OpenAI-compatible", base_url: "", model: "", embedding_model: "text-embedding-3-small", supports_remote_embeddings: true, requires_key: false, note: "", env_key_set: false, selected: provider === "custom" },
   ];
   const selectedPreset = providerOptions.find((item) => item.id === provider);
+  const supportsRemoteEmbeddings = selectedPreset?.supports_remote_embeddings ?? !["offline", "groq"].includes(provider);
   const envKeyActive = Boolean(selectedPreset?.env_key_set || form.key_source === "environment");
+  const chatModelOptions = Array.from(new Set([
+    ...(models?.chat_models.map((item) => item.id) ?? []),
+    form.ai_model,
+  ].filter(Boolean)));
+  const embeddingModelOptions = Array.from(new Set([
+    ...(models?.embedding_models.map((item) => item.id) ?? []),
+    form.ai_embedding_model,
+  ].filter(Boolean)));
+
+  const updateEmbeddingMode = (mode: "local" | "remote") => {
+    setForm((current) => {
+      if (!current) return current;
+      const next = { ...current, embedding_provider: mode };
+      if (mode === "remote" && selectedPreset?.embedding_model) next.ai_embedding_model = selectedPreset.embedding_model;
+      return next;
+    });
+    setTestResult(null);
+  };
 
   return (
     <div className="space-y-5">
@@ -243,7 +302,7 @@ export default function Settings() {
           <Card>
             <CardHeader className="flex-row items-start justify-between gap-3">
               <div><CardTitle className="flex items-center gap-2"><Sparkles size={15} className="text-primary" /> AI provider</CardTitle><p className="mt-1 text-xs text-muted-foreground">Optional. Offline mode uses a local retrieval engine and clear scaffolds so the app works without any API key.</p></div>
-              <Badge className={aiStatus?.configured ? "border-success/30 text-success" : ""}>{aiStatus?.configured ? "Configured" : "Offline"}</Badge>
+              <Badge className={testResult?.ok || aiStatus?.configured ? "border-success/30 text-success" : ""}>{testResult?.ok ? "Verified this session" : aiStatus?.configured ? "Configured" : "Offline"}</Badge>
             </CardHeader>
             <CardContent className="space-y-4">
               <div className="grid gap-3 sm:grid-cols-2">
@@ -256,10 +315,17 @@ export default function Settings() {
                 </div>
                 <div>
                   <label className="label">Embedding mode</label>
-                  <Select value={form.embedding_provider} onChange={(event) => update("embedding_provider", event.target.value)}>
-                    <option value="local">Local feature hashing</option>
-                    <option value="remote">Remote embeddings</option>
+                  <Select value={form.embedding_provider} onChange={(event) => updateEmbeddingMode(event.target.value as "local" | "remote")}>
+                    <option value="local">Local feature hashing (384 dimensions)</option>
+                    <option value="remote" disabled={!supportsRemoteEmbeddings}>
+                      Remote embeddings via {selectedPreset?.label || provider}
+                    </option>
                   </Select>
+                  <p className="mt-1 text-[10px] leading-4 text-muted-foreground">
+                    {supportsRemoteEmbeddings
+                      ? "Remote embeddings use the same provider credentials and require a re-index after changing models."
+                      : "This provider does not expose remote embeddings here; local embeddings remain available."}
+                  </p>
                 </div>
               </div>
 
@@ -274,7 +340,16 @@ export default function Settings() {
               {usesRemote && provider !== "local" ? (
                 <div className="grid gap-3 sm:grid-cols-2">
                   <div><label className="label">Base URL</label><Input value={form.ai_base_url} onChange={(event) => update("ai_base_url", event.target.value)} placeholder="https://api.openai.com/v1" /></div>
-                  <div><label className="label">Model</label><Input value={form.ai_model} onChange={(event) => update("ai_model", event.target.value)} placeholder="gpt-4o-mini" /></div>
+                  <div>
+                    <label className="label">Chat model</label>
+                    <div className="flex gap-2">
+                      <Select value={form.ai_model} onChange={(event) => update("ai_model", event.target.value)}>
+                        {chatModelOptions.length ? chatModelOptions.map((id) => <option key={id} value={id}>{id}</option>) : <option value={form.ai_model}>{form.ai_model || "Load models first"}</option>}
+                      </Select>
+                      <Button type="button" variant="outline" size="sm" onClick={fetchModels} loading={loadingModels} aria-label="Load available models"><RefreshCw size={13} /></Button>
+                    </div>
+                    <p className="mt-1 text-[10px] leading-4 text-muted-foreground">Exact model ID from the provider catalogue, not a guessed alias.</p>
+                  </div>
                   <div>
                     <label className="label">API key</label>
                     <div className="flex gap-2">
@@ -283,7 +358,24 @@ export default function Settings() {
                     </div>
                     <p className="mt-1 text-[10px] text-muted-foreground">{envKeysOnly || envKeyActive ? "This server supplies the key from environment variables, so stored account keys are not used." : "Encrypted in your account. Leave blank to keep the saved key."}</p>
                   </div>
-                  <div><label className="label">Embedding model</label><Input value={form.ai_embedding_model} onChange={(event) => update("ai_embedding_model", event.target.value)} placeholder="text-embedding-3-small" /></div>
+                </div>
+              ) : null}
+
+              {usesRemote && form.embedding_provider === "remote" ? (
+                <div className="rounded-xl border border-border bg-muted/20 p-3">
+                  <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
+                    <div>
+                      <label className="label">Embedding model</label>
+                      <Select value={form.ai_embedding_model} onChange={(event) => update("ai_embedding_model", event.target.value)}>
+                        {embeddingModelOptions.length ? embeddingModelOptions.map((id) => <option key={id} value={id}>{id}</option>) : <option value={form.ai_embedding_model}>{form.ai_embedding_model || "Load models first"}</option>}
+                      </Select>
+                    </div>
+                    <Button type="button" variant="outline" size="sm" onClick={fetchModels} loading={loadingModels}><RefreshCw size={13} /> Load models</Button>
+                  </div>
+                  <p className="mt-2 text-[10px] leading-4 text-muted-foreground">
+                    Vectors are forced to {form.embedding_dimensions || 384} dimensions for this index. Changing this model requires re-indexing before semantic retrieval can use it.
+                  </p>
+                  {models?.message ? <p className="mt-1 text-[10px] text-warning">{models.message}</p> : null}
                 </div>
               ) : null}
 
@@ -299,11 +391,40 @@ export default function Settings() {
                 <Button variant="outline" onClick={() => saveAI(true)} loading={testing} disabled={provider === "offline"}><Zap size={14} /> Save & test</Button>
               </div>
 
+              {testResult ? (
+                <div className="space-y-2 rounded-xl border border-border bg-muted/20 p-3 text-[10px] leading-4">
+                  <p className="flex items-center gap-2 font-medium text-foreground">
+                    <Zap size={12} className="text-primary" /> Latest test results
+                    <Badge className={testResult.ok ? "border-success/30 text-success" : "border-warning/30 text-warning"}>{testResult.ok ? "Passed" : "Action needed"}</Badge>
+                  </p>
+                  {([
+                    ["Chat", testResult.chat],
+                    ["Embeddings", testResult.embedding],
+                  ] as const).map(([label, part]) => (
+                    <div key={label} className="rounded-lg border border-border/60 bg-background/30 px-2.5 py-2">
+                      <p className="flex items-center gap-1.5 font-medium text-foreground">
+                        {part.ok ? <CheckCircle2 size={11} className="text-success" /> : <AlertTriangle size={11} className="text-warning" />}
+                        {label}: {part.ok ? (part.skipped ? "Skipped" : "Passed") : "Failed"}
+                        {part.dimensions ? <span className="font-normal text-muted-foreground">({part.dimensions} dims)</span> : null}
+                      </p>
+                      <p className="mt-0.5 text-muted-foreground">{part.message}</p>
+                      {part.signature ? <p className="mt-0.5 font-mono text-[9px] text-muted-foreground">{part.signature}</p> : null}
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+
               {aiStatus ? (
                 <div className="rounded-xl border border-border bg-muted/20 p-3 text-[10px] leading-5 text-muted-foreground">
                   <p className="flex items-center gap-1.5 font-medium text-foreground"><Brain size={12} className="text-primary" /> {aiStatus.provider} · {aiStatus.model || "no model"}</p>
                   <p className="mt-1">{aiStatus.message}</p>
-                  <p className="mt-1">{aiStatus.ready_documents} documents · {aiStatus.indexed_chunks} indexed chunks · embeddings: {aiStatus.embedding_provider}</p>
+                  <p className="mt-1">{aiStatus.ready_documents} documents · {aiStatus.indexed_chunks} indexed chunks · embeddings: {aiStatus.embedding_provider}{aiStatus.embedding_model ? ` / ${aiStatus.embedding_model}` : ""}</p>
+                  {aiStatus.embedding_index ? (
+                    <p className="mt-1">
+                      Index: {aiStatus.embedding_index.matching_chunks}/{aiStatus.embedding_index.total_chunks} chunks match the current embedding model.
+                      {aiStatus.needs_reindex ? <span className="text-warning"> Re-index required; mismatched chunks are excluded from vector search.</span> : null}
+                    </p>
+                  ) : null}
                 </div>
               ) : null}
               <p className="text-[10px] leading-4 text-muted-foreground">Your API key is encrypted at rest and never sent anywhere except the provider you configure. Answers are grounded in your documents when citations are available.</p>

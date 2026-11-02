@@ -1,9 +1,11 @@
 from typing import Optional
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from ..config import (
     DEFAULT_SETTINGS,
+    EMBEDDING_DIMENSIONS,
     ENV_AI_BASE_URLS,
     ENV_AI_KEYS,
     ENV_AI_MODELS,
@@ -11,27 +13,69 @@ from ..config import (
     SECRET_SETTING_KEYS,
 )
 from ..database import current_user_id
-from ..models import Preference, Secret
+from ..models import Document, DocumentChunk, Preference, Secret
 from ..security import decrypt_value, encrypt_value
 
 PROVIDER_DEFAULTS = {
-    "openai": {"base_url": "https://api.openai.com/v1", "model": "gpt-4o-mini"},
-    "gemini": {"base_url": "https://generativelanguage.googleapis.com/v1beta", "model": "gemini-3.5-flash"},
-    "groq": {"base_url": "https://api.groq.com/openai/v1", "model": "llama-3.3-70b-versatile"},
-    "custom": {"base_url": "", "model": ""},
-    "local": {"base_url": "http://127.0.0.1:11434/v1", "model": "llama3.1"},
-    "offline": {"base_url": "", "model": ""},
+    "openai": {
+        "base_url": "https://api.openai.com/v1",
+        "model": "gpt-4o-mini",
+        "embedding_model": "text-embedding-3-small",
+    },
+    "gemini": {
+        "base_url": "https://generativelanguage.googleapis.com/v1beta",
+        "model": "gemini-3.6-flash",
+        "embedding_model": "gemini-embedding-2",
+    },
+    "groq": {
+        "base_url": "https://api.groq.com/openai/v1",
+        "model": "llama-3.3-70b-versatile",
+        "embedding_model": "",
+    },
+    "custom": {
+        "base_url": "",
+        "model": "",
+        "embedding_model": "text-embedding-3-small",
+    },
+    "local": {
+        "base_url": "http://127.0.0.1:11434/v1",
+        "model": "llama3.1",
+        "embedding_model": "text-embedding-3-small",
+    },
+    "offline": {
+        "base_url": "",
+        "model": "",
+        "embedding_model": "",
+    },
 }
 PROVIDER_ALIASES = {
     "openai_compatible": "custom",
     "ollama": "local",
     "google": "gemini",
 }
+EMBEDDING_MODES = {"local", "remote"}
+REMOTE_EMBEDDING_PROVIDERS = {"gemini", "openai", "custom", "local"}
+LOCAL_EMBEDDING_MODEL = "local-hash-v1"
 
 
 def normalize_provider(provider: str) -> str:
     value = (provider or "offline").strip().lower()
     return PROVIDER_ALIASES.get(value, value)
+
+
+def normalize_embedding_mode(value: str) -> str:
+    mode = (value or "local").strip().lower()
+    return mode if mode in EMBEDDING_MODES else "local"
+
+
+def default_embedding_model(provider: str) -> str:
+    return PROVIDER_DEFAULTS.get(normalize_provider(provider), PROVIDER_DEFAULTS["offline"])["embedding_model"]
+
+
+def embedding_signature(provider: str, model: str) -> str:
+    if normalize_provider(provider) == "local" or not model or model == LOCAL_EMBEDDING_MODEL:
+        return LOCAL_EMBEDDING_MODEL
+    return f"{normalize_provider(provider)}:{model}"
 
 
 def _scoped(key: str) -> str:
@@ -58,6 +102,7 @@ def public_settings(db: Session) -> dict:
     values["ai_api_key"] = ("*" * 8 + key[-4:]) if key else ""
     values["ai_api_key_set"] = bool(key)
     values["ai_provider"] = normalize_provider(values.get("ai_provider", "offline"))
+    values["embedding_provider"] = normalize_embedding_mode(values.get("embedding_provider", "local"))
     values["env_keys_only"] = ENV_KEYS_ONLY
     return values
 
@@ -91,6 +136,8 @@ def update_settings(db: Session, updates: dict) -> None:
                 continue
             if key == "ai_provider":
                 value = normalize_provider(str(value))
+            if key == "embedding_provider":
+                value = normalize_embedding_mode(str(value))
             set_setting(db, key, str(value))
 
 
@@ -103,8 +150,7 @@ def _provider_key(provider: str, stored_key: str) -> tuple[str, str]:
     return "", "none"
 
 
-def get_ai_config(db: Session) -> dict:
-    settings = get_settings(db)
+def build_ai_config(settings: dict) -> dict:
     provider = normalize_provider(settings.get("ai_provider", "offline"))
     defaults = PROVIDER_DEFAULTS.get(provider, PROVIDER_DEFAULTS["offline"])
     stored_key = settings.get("ai_api_key", "")
@@ -114,11 +160,17 @@ def get_ai_config(db: Session) -> dict:
     if provider == "local":
         base_url = ENV_AI_BASE_URLS.get("local") or settings.get("local_base_url", "") or defaults["base_url"]
         model = ENV_AI_MODELS.get("local") or settings.get("local_model", "") or defaults["model"]
-    embedding_provider = settings.get("embedding_provider", "local")
-    embedding_model = settings.get("ai_embedding_model", "")
 
-    if embedding_provider == "local":
-        embedding_model = "local-hash-v1"
+    embedding_mode = normalize_embedding_mode(settings.get("embedding_provider", "local"))
+    if embedding_mode == "local":
+        embedding_provider = "local"
+        embedding_model = LOCAL_EMBEDDING_MODEL
+    elif provider in REMOTE_EMBEDDING_PROVIDERS:
+        embedding_provider = provider
+        embedding_model = settings.get("ai_embedding_model", "") or defaults["embedding_model"]
+    else:
+        embedding_provider = "unsupported"
+        embedding_model = ""
 
     try:
         temperature = float(settings.get("ai_temperature", "0.4"))
@@ -132,6 +184,12 @@ def get_ai_config(db: Session) -> dict:
     configured = provider != "offline" and bool(model) and bool(base_url) and (
         bool(api_key) or provider in {"local", "custom"}
     )
+    embedding_configured = embedding_provider == "local" or (
+        configured
+        and embedding_provider in REMOTE_EMBEDDING_PROVIDERS
+        and bool(embedding_model)
+        and (bool(api_key) or embedding_provider in {"local", "custom"})
+    )
     return {
         "provider": provider,
         "base_url": (base_url or "").rstrip("/"),
@@ -140,11 +198,46 @@ def get_ai_config(db: Session) -> dict:
         "stored_key_set": bool(stored_key),
         "env_key_set": bool(ENV_AI_KEYS.get(provider, "")),
         "model": model,
+        "embedding_mode": embedding_mode,
         "embedding_provider": embedding_provider,
         "embedding_model": embedding_model,
+        "embedding_configured": embedding_configured,
+        "embedding_dimensions": EMBEDDING_DIMENSIONS,
+        "embedding_signature": embedding_signature(embedding_provider, embedding_model),
         "temperature": temperature,
         "max_tokens": max_tokens,
         "configured": configured,
+    }
+
+
+def get_ai_config(db: Session) -> dict:
+    return build_ai_config(get_settings(db))
+
+
+def _index_signature(value: object) -> str:
+    signature = str(value or "").strip()
+    if signature in {"", "local", LOCAL_EMBEDDING_MODEL}:
+        return LOCAL_EMBEDDING_MODEL
+    return signature
+
+
+def embedding_index_status(db: Session, cfg: dict) -> dict:
+    rows = (
+        db.query(DocumentChunk.embed_provider, func.count(DocumentChunk.id))
+        .join(Document, Document.id == DocumentChunk.document_id)
+        .filter(Document.active.is_(True), Document.status == "ready")
+        .group_by(DocumentChunk.embed_provider)
+        .all()
+    )
+    signatures = {_index_signature(signature): count for signature, count in rows}
+    total = sum(signatures.values())
+    active = _index_signature(cfg.get("embedding_signature"))
+    matching = signatures.get(active, 0)
+    return {
+        "signatures": signatures,
+        "total_chunks": total,
+        "matching_chunks": matching,
+        "needs_reindex": total > 0 and matching != total,
     }
 
 

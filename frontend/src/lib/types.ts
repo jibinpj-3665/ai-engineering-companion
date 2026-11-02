@@ -391,9 +391,24 @@ export interface Settings {
   ai_configured?: boolean;
   effective_base_url?: string;
   effective_model?: string;
+  effective_embedding_mode?: "local" | "remote";
+  effective_embedding_provider?: string;
+  effective_embedding_model?: string;
+  embedding_configured?: boolean;
+  embedding_dimensions?: number;
+  embedding_signature?: string;
+  embedding_index?: EmbeddingIndex;
+  needs_reindex?: boolean;
   key_source?: "environment" | "account" | "none";
   env_key_set?: boolean;
   env_keys_only?: boolean;
+}
+
+export interface EmbeddingIndex {
+  signatures: Record<string, number>;
+  total_chunks: number;
+  matching_chunks: number;
+  needs_reindex: boolean;
 }
 
 export interface AIStatus {
@@ -404,6 +419,11 @@ export interface AIStatus {
   key_source?: string;
   env_key_set?: boolean;
   embedding_provider: string;
+  embedding_model?: string;
+  embedding_configured?: boolean;
+  embedding_signature?: string;
+  embedding_index?: EmbeddingIndex;
+  needs_reindex?: boolean;
   indexed_chunks: number;
   ready_documents: number;
   message: string;
@@ -545,6 +565,8 @@ export interface ProviderPreset {
   label: string;
   base_url: string;
   model: string;
+  embedding_model?: string;
+  supports_remote_embeddings?: boolean;
   requires_key: boolean;
   note: string;
   env_key_set: boolean;
@@ -557,10 +579,45 @@ export interface ProviderList {
   key_source: string;
 }
 
+export interface ModelInfo {
+  id: string;
+  display_name: string;
+  input_token_limit?: number | null;
+  output_token_limit?: number | null;
+}
+
 export interface ModelList {
   provider: string;
   models: string[];
+  chat_models: ModelInfo[];
+  embedding_models: ModelInfo[];
   message: string;
+}
+
+export interface ModelDiscoveryInput {
+  provider?: string;
+  base_url?: string;
+  api_key?: string;
+  embedding_provider?: "local" | "remote";
+}
+
+export interface AITestPart {
+  ok: boolean;
+  skipped?: boolean;
+  provider: string;
+  model: string;
+  message: string;
+  signature?: string;
+  dimensions?: number;
+}
+
+export interface AITestResult {
+  ok: boolean;
+  provider: string;
+  model: string;
+  message: string;
+  chat: AITestPart;
+  embedding: AITestPart;
 }
 
 export interface AIUsageLog {

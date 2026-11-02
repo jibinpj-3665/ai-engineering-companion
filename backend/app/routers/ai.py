@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from ..ai.providers import (
     AIError,
     chat_completion,
-    list_models,
+    list_models_for_config,
     stream_chat_completion,
     test_connection,
 )
@@ -22,14 +22,19 @@ from ..models import (
     AIUsageLog,
     Conversation,
     Document,
-    DocumentChunk,
     Message,
     Subject,
     SyllabusTopic,
     utcnow,
 )
 from ..serializers import iso
-from ..services.settings import get_ai_config, normalize_provider
+from ..services.settings import (
+    build_ai_config,
+    embedding_index_status,
+    get_ai_config,
+    get_settings,
+    normalize_provider,
+)
 
 router = APIRouter(prefix="/ai", tags=["ai"])
 
@@ -93,30 +98,38 @@ PROVIDER_PRESETS = [
         "label": "OpenAI",
         "base_url": "https://api.openai.com/v1",
         "model": "gpt-4o-mini",
+        "embedding_model": "text-embedding-3-small",
+        "supports_remote_embeddings": True,
         "requires_key": True,
-        "note": "GPT models through the OpenAI API.",
+        "note": "GPT models and OpenAI embeddings through the OpenAI API.",
     },
     {
         "id": "gemini",
         "label": "Google Gemini",
         "base_url": "https://generativelanguage.googleapis.com/v1beta",
-        "model": "gemini-3.5-flash",
+        "model": "gemini-3.6-flash",
+        "embedding_model": "gemini-embedding-2",
+        "supports_remote_embeddings": True,
         "requires_key": True,
-        "note": "Gemini models through the Google AI Studio API.",
+        "note": "Gemini models and Gemini embeddings through the Google AI Studio API.",
     },
     {
         "id": "groq",
         "label": "Groq",
         "base_url": "https://api.groq.com/openai/v1",
         "model": "llama-3.3-70b-versatile",
+        "embedding_model": "",
+        "supports_remote_embeddings": False,
         "requires_key": True,
-        "note": "Fast OpenAI-compatible inference from Groq.",
+        "note": "Fast OpenAI-compatible inference from Groq. Local embeddings remain available.",
     },
     {
         "id": "local",
         "label": "Ollama / local server",
         "base_url": "http://127.0.0.1:11434/v1",
         "model": "llama3.1",
+        "embedding_model": "text-embedding-3-small",
+        "supports_remote_embeddings": True,
         "requires_key": False,
         "note": "OpenAI-compatible local server such as Ollama. No cloud key required.",
     },
@@ -125,14 +138,18 @@ PROVIDER_PRESETS = [
         "label": "Custom OpenAI-compatible",
         "base_url": "",
         "model": "",
+        "embedding_model": "text-embedding-3-small",
+        "supports_remote_embeddings": True,
         "requires_key": False,
-        "note": "Any OpenAI-compatible chat endpoint, including self-hosted gateways.",
+        "note": "Any OpenAI-compatible chat or embedding endpoint, including self-hosted gateways.",
     },
     {
         "id": "offline",
         "label": "Offline retrieval only",
         "base_url": "",
         "model": "",
+        "embedding_model": "",
+        "supports_remote_embeddings": False,
         "requires_key": False,
         "note": "No AI generation. Answers quote indexed material and are explicitly labelled.",
     },
@@ -159,6 +176,13 @@ class EvaluateRequest(BaseModel):
     answer: str = Field(min_length=1, max_length=6000)
     subject_id: Optional[int] = None
     topic_id: Optional[int] = None
+
+
+class ModelDiscoveryRequest(BaseModel):
+    provider: Optional[str] = None
+    base_url: Optional[str] = None
+    api_key: Optional[str] = None
+    embedding_provider: Optional[str] = None
 
 
 def _validate_mode(mode: str) -> str:
@@ -283,6 +307,13 @@ def _prepare_chat(db: Session, payload: ChatRequest) -> dict:
 @router.get("/status")
 def ai_status(db: Session = Depends(get_db)):
     cfg = get_ai_config(db)
+    index = embedding_index_status(db, cfg)
+    if cfg["configured"]:
+        message = "AI provider settings are saved. Run the chat and embedding tests to verify them."
+    else:
+        message = "Offline mode: answers use only your indexed material."
+    if index["needs_reindex"]:
+        message += " The embedding index uses a different provider/model; re-index documents before semantic search."
     return {
         "provider": cfg["provider"],
         "configured": cfg["configured"],
@@ -291,14 +322,16 @@ def ai_status(db: Session = Depends(get_db)):
         "key_source": cfg["key_source"],
         "env_key_set": cfg["env_key_set"],
         "embedding_provider": cfg["embedding_provider"],
-        "indexed_chunks": db.query(DocumentChunk)
-        .join(Document, Document.id == DocumentChunk.document_id)
-        .filter(Document.active.is_(True), Document.status == "ready")
-        .count(),
+        "embedding_model": cfg["embedding_model"],
+        "embedding_configured": cfg["embedding_configured"],
+        "embedding_signature": cfg["embedding_signature"],
+        "embedding_index": index,
+        "needs_reindex": index["needs_reindex"],
+        "indexed_chunks": index["total_chunks"],
         "ready_documents": db.query(Document)
         .filter(Document.status == "ready", Document.active.is_(True))
         .count(),
-        "message": "AI provider configured." if cfg["configured"] else "Offline mode: answers use only your indexed material.",
+        "message": message,
     }
 
 
@@ -320,9 +353,24 @@ def providers(db: Session = Depends(get_db)):
 
 
 @router.post("/models")
-async def models(db: Session = Depends(get_db)):
+async def models(payload: ModelDiscoveryRequest | None = None, db: Session = Depends(get_db)):
+    cfg = get_ai_config(db)
+    if payload and any(
+        value is not None
+        for value in (payload.provider, payload.base_url, payload.api_key, payload.embedding_provider)
+    ):
+        values = get_settings(db)
+        if payload.provider:
+            values["ai_provider"] = normalize_provider(payload.provider)
+        if payload.base_url is not None:
+            values["ai_base_url"] = payload.base_url
+        if payload.api_key and set(payload.api_key.strip()) != {"*"}:
+            values["ai_api_key"] = payload.api_key
+        if payload.embedding_provider:
+            values["embedding_provider"] = payload.embedding_provider
+        cfg = build_ai_config(values)
     try:
-        return await list_models(db)
+        return await list_models_for_config(cfg)
     except AIError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

@@ -111,7 +111,7 @@ class SyllabusImportBatch(TenantMixin, Base):
 
     id = Column(Integer, primary_key=True)
     source_root = Column(String(1000), default="")
-    status = Column(String(20), default="discovering", index=True)
+    status = Column(String(64), default="discovering", index=True)
     total_files = Column(Integer, default=0)
     imported_files = Column(Integer, default=0)
     duplicate_files = Column(Integer, default=0)
