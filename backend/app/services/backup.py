@@ -6,10 +6,10 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
 
-from sqlalchemy import Boolean, Date, DateTime, Float, Integer
+from sqlalchemy import Boolean, Date, DateTime, Float, Integer, text
 from sqlalchemy.orm import Session
 
-from ..config import BACKUP_DIR, UPLOAD_DIR, VERSION
+from ..config import BACKUP_DIR, DATABASE_URL, UPLOAD_DIR, VERSION
 from ..database import SCHEMA_VERSION, current_user_id
 from ..models import (
     AIUsageLog,
@@ -38,6 +38,7 @@ from ..models import (
 
 FORMAT = "aec-backup-v2"
 MAX_RESTORE_BYTES = 500 * 1024 * 1024
+IS_POSTGRESQL = str(DATABASE_URL).startswith("postgresql")
 
 EXPORT_ORDER = [
     ("subjects", Subject),
@@ -261,6 +262,8 @@ def restore_user_backup(db: Session, archive_path: Path) -> dict:
                 upload_members,
                 document_uploads,
             )
+            if IS_POSTGRESQL:
+                _advance_postgres_sequences(db)
             db.commit()
         except Exception:
             db.rollback()
@@ -297,7 +300,7 @@ def _restore_tables(
             old_id = row.get("id")
             values = {}
             for column in model.__table__.columns:
-                if column.name in {"id", "user_id"}:
+                if column.name == "user_id":
                     continue
                 value = _deserialize(row.get(column.name), column)
                 if column.name in fks and value is not None:
@@ -331,3 +334,25 @@ def _restore_tables(
                 mapping[old_id] = obj.id
             inserted += 1
         counts[table] = inserted
+
+
+def _advance_postgres_sequences(db: Session) -> None:
+    if not IS_POSTGRESQL:
+        return
+    for _table, model in EXPORT_ORDER:
+        table = model.__tablename__
+        try:
+            seq = db.execute(
+                text("SELECT pg_get_serial_sequence(:table, 'id')"),
+                {"table": table},
+            ).scalar()
+        except Exception:
+            continue
+        if not seq:
+            continue
+        db.execute(
+            text(
+                f"SELECT setval(:seq, COALESCE((SELECT max(id) FROM {table}), 1), true)"
+            ),
+            {"seq": seq},
+        )
